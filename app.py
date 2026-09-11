@@ -39,6 +39,15 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 header[data-testid="stHeader"] { background: transparent; }
 header[data-testid="stHeader"] [data-testid="stMainMenu"],
 header[data-testid="stHeader"] [data-testid="stAppDeployButton"] { visibility: hidden; }
+header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"] {
+    visibility: visible !important;
+    opacity: 1 !important;
+    background: rgba(0,212,255,0.14) !important;
+    border: 1px solid rgba(0,212,255,0.4) !important;
+    border-radius: 6px !important;
+}
+header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"] svg,
+header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"] span { color: #00d4ff !important; }
 
 .hktm-header {
     display: flex; align-items: center; justify-content: space-between;
