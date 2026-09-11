@@ -1,6 +1,9 @@
 """Bit/byte helpers and raw IQ file I/O shared by the CCSDS signal chain."""
 
+from math import gcd
+
 import numpy as np
+from scipy.signal import resample_poly
 
 
 def bytes_to_bits(data: bytes) -> np.ndarray:
@@ -39,14 +42,51 @@ def generate_payload(n_cadu: int, frame_bytes: int, source_path: str | None = No
     return data
 
 
-def write_iq_interleaved_float32(path: str, iq: np.ndarray) -> None:
-    """Write complex samples as raw interleaved float32: I0,Q0,I1,Q1,..."""
-    interleaved = np.empty(2 * len(iq), dtype=np.float32)
-    interleaved[0::2] = iq.real.astype(np.float32)
-    interleaved[1::2] = iq.imag.astype(np.float32)
-    interleaved.tofile(path)
+def normalize_peak(iq: np.ndarray, peak: float = 0.9) -> np.ndarray:
+    """Scale complex samples so the largest |I| or |Q| excursion equals
+    `peak` (default 0.9, leaving headroom against clipping on playback)."""
+    current_peak = max(np.abs(iq.real).max(), np.abs(iq.imag).max())
+    if current_peak == 0:
+        return iq
+    return iq * (peak / current_peak)
 
 
-def read_iq_interleaved_float32(path: str) -> np.ndarray:
-    raw = np.fromfile(path, dtype=np.float32)
-    return raw[0::2] + 1j * raw[1::2]
+def resample_iq(iq: np.ndarray, source_fs: float, target_fs: float) -> np.ndarray:
+    """Resample complex samples to an exact target sample rate, via
+    polyphase resampling (`scipy.signal.resample_poly`) at the smallest
+    exact integer up/down ratio between the two (rounded to the nearest
+    Hz first, since real sample rates are always effectively integers)."""
+    source_hz, target_hz = round(source_fs), round(target_fs)
+    step = gcd(source_hz, target_hz)
+    up, down = target_hz // step, source_hz // step
+    return resample_poly(iq, up, down)
+
+
+def pack_iq_interleaved(iq: np.ndarray, dtype: str = "float32") -> bytes:
+    """Pack complex samples as raw interleaved bytes, no header: I0, Q0,
+    I1, Q1, .... `dtype` is "float32" (range [-1, +1]) or "int16"
+    (full-scale signed 16-bit; samples should already be normalized to at
+    most unit magnitude, e.g. via `normalize_peak`)."""
+    n = len(iq)
+    if dtype == "float32":
+        interleaved = np.empty(2 * n, dtype=np.float32)
+        interleaved[0::2] = iq.real.astype(np.float32)
+        interleaved[1::2] = iq.imag.astype(np.float32)
+    elif dtype == "int16":
+        interleaved = np.empty(2 * n, dtype=np.int16)
+        interleaved[0::2] = np.clip(np.round(iq.real * 32767), -32768, 32767).astype(np.int16)
+        interleaved[1::2] = np.clip(np.round(iq.imag * 32767), -32768, 32767).astype(np.int16)
+    else:
+        raise ValueError(f"unsupported IQ output dtype {dtype!r} (expected 'float32' or 'int16')")
+    return interleaved.tobytes()
+
+
+def unpack_iq_interleaved(data: bytes, dtype: str = "float32") -> np.ndarray:
+    """Inverse of `pack_iq_interleaved`."""
+    if dtype == "float32":
+        raw = np.frombuffer(data, dtype=np.float32)
+        return raw[0::2] + 1j * raw[1::2]
+    if dtype == "int16":
+        raw = np.frombuffer(data, dtype=np.int16)
+        return (raw[0::2] + 1j * raw[1::2]).astype(np.complex128) / 32767
+    raise ValueError(f"unsupported IQ input dtype {dtype!r} (expected 'float32' or 'int16')")

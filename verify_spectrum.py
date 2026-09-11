@@ -14,14 +14,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ccsds_chain.utils import read_iq_interleaved_float32
+from ccsds_chain.utils import unpack_iq_interleaved
 from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("iq_file")
-    ap.add_argument("--sample-rate", type=float, default=None, help="override meta.json sample_rate (Hz)")
+    ap.add_argument("--sample-rate", type=float, default=None,
+                    help="override meta.json output_sample_rate (Hz)")
+    ap.add_argument("--dtype", choices=["float32", "int16"], default=None,
+                    help="override meta.json output_dtype")
     ap.add_argument("--nperseg", type=int, default=4096)
     ap.add_argument("--plot", type=str, default=None, help="save spectrum plot PNG to this path")
     args = ap.parse_args()
@@ -32,12 +35,14 @@ def main():
         with open(meta_path) as f:
             meta = json.load(f)
 
-    fs = args.sample_rate or meta.get("sample_rate")
+    fs = args.sample_rate or meta.get("output_sample_rate") or meta.get("sample_rate")
     if fs is None:
         raise SystemExit("sample rate unknown: pass --sample-rate or generate the matching .meta.json")
+    dtype = args.dtype or meta.get("output_dtype", "float32")
 
-    iq = read_iq_interleaved_float32(args.iq_file)
-    print(f"File: {args.iq_file}  ({len(iq)} campioni IQ @ {fs / 1e6:.3f} MS/s)")
+    with open(args.iq_file, "rb") as f:
+        iq = unpack_iq_interleaved(f.read(), dtype)
+    print(f"File: {args.iq_file}  ({len(iq)} campioni IQ @ {fs / 1e6:.3f} MS/s, formato {dtype})")
 
     psd = welch_psd(iq, args.nperseg)
     freqs = np.fft.fftshift(np.fft.fftfreq(args.nperseg, d=1 / fs))

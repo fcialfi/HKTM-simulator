@@ -10,6 +10,7 @@ Uso: streamlit run app.py
 """
 
 import dataclasses
+import datetime
 import json
 
 import numpy as np
@@ -18,6 +19,7 @@ import streamlit as st
 
 from ccsds_chain.pipeline import ChainParams, run_chain
 from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth
+from ccsds_chain.utils import normalize_peak, resample_iq, pack_iq_interleaved
 
 BITS_PER_SYMBOL = {"QPSK": 2}
 
@@ -255,9 +257,6 @@ with st.sidebar:
         else:
             st.caption("No file uploaded: falling back to pseudo-random.")
 
-    st.markdown("### Output")
-    output_filename = st.text_input("IQ file name", value="output_iq.raw")
-
 # --------------------------------------------------------------------------
 # Build params & run chain
 # --------------------------------------------------------------------------
@@ -433,6 +432,12 @@ with side_col:
 # Export
 # --------------------------------------------------------------------------
 st.markdown("### Export")
+st.caption(
+    "Produces a raw baseband IQ file (no header, interleaved I0,Q0,I1,Q1,...) "
+    "for an IQ recorder/replayer such as RF-Catcher's Capture & Playback. The "
+    "file carries no carrier/frequency information -- set the intended RF "
+    "center frequency manually on the playback instrument."
+)
 
 symbols_per_cadu = len(result.symbols) / params.n_cadu
 exp_col1, exp_col2 = st.columns([1, 2])
@@ -448,9 +453,46 @@ with exp_col1:
     )
 with exp_col2:
     export_duration_s = export_n_cadu * symbols_per_cadu / params.symbol_rate
-    export_mb = export_n_cadu * symbols_per_cadu * params.sps * 8 / 1e6  # interleaved float32
-    size_warning = " -- large: generating this may take a while and use significant RAM" if export_mb > 500 else ""
-    st.caption(f"~{export_duration_s:.2f} s of signal, ~{export_mb:,.0f} MB file{size_warning}")
+
+fmt_col1, fmt_col2, fmt_col3 = st.columns(3)
+with fmt_col1:
+    output_dtype_label = st.selectbox(
+        "Output format", ["float32 ([-1, +1])", "int16 (full-scale)"],
+        help=(
+            "Sample data type for the raw IQ file. float32 is compatible "
+            "with most modern SDR tooling; int16 is a more compact, "
+            "quantized format some instruments expect -- check what your "
+            "IQ recorder/replayer requires."
+        ),
+    )
+    output_dtype = "int16" if output_dtype_label.startswith("int16") else "float32"
+with fmt_col2:
+    output_peak = st.number_input(
+        "Peak amplitude", min_value=0.1, max_value=1.0, value=0.9, step=0.05,
+        help="Normalized peak |I|/|Q| amplitude before dtype conversion, leaving headroom against clipping on playback.",
+    )
+with fmt_col3:
+    resample_enabled = st.checkbox(
+        "Resample to fixed rate",
+        help=(
+            "Resample the exported file (via polyphase resampling) to an "
+            "exact sample rate your instrument expects, independent of the "
+            "chain's native symbol_rate x samples/symbol. The live preview "
+            "and internal processing are unaffected -- this only reshapes "
+            "the exported samples."
+        ),
+    )
+    target_fs = st.number_input("Target sample rate (Hz)", min_value=1.0, value=10_000_000.0, step=1e6,
+                                 disabled=not resample_enabled, format="%.0f")
+
+native_fs = params.symbol_rate * params.sps
+export_output_fs = target_fs if resample_enabled else native_fs
+export_bytes_per_sample = 4 if output_dtype == "float32" else 2
+export_native_samples = export_n_cadu * symbols_per_cadu * params.sps
+export_samples = export_native_samples * (export_output_fs / native_fs)
+export_mb = export_samples * 2 * export_bytes_per_sample / 1e6
+size_warning = " -- large: generating this may take a while and use significant RAM" if export_mb > 500 else ""
+st.caption(f"~{export_duration_s:.2f} s of signal, ~{export_mb:,.0f} MB file{size_warning}")
 
 generate_clicked = st.button("Generate export file", width='stretch')
 
@@ -458,35 +500,54 @@ export_key = (
     export_n_cadu, params.rs_e, params.interleave_depth, params.fec_rs, params.fec_conv,
     params.conv_rate, params.conv_invert_g2, params.randomizer, params.rrc_alpha,
     params.rrc_span, params.sps, params.symbol_rate, params.seed, payload_mode,
+    output_dtype, output_peak, resample_enabled, target_fs if resample_enabled else None,
 )
 if generate_clicked:
     export_params = dataclasses.replace(params, n_cadu=int(export_n_cadu))
     with st.spinner(f"Generating {export_n_cadu} CADUs..."):
-        st.session_state["export_result"] = run_chain(export_params)
+        export_result = run_chain(export_params)
+        iq = normalize_peak(export_result.iq, output_peak)
+        output_fs = export_result.sample_rate
+        if resample_enabled and target_fs != export_result.sample_rate:
+            iq = resample_iq(iq, export_result.sample_rate, target_fs)
+            output_fs = target_fs
+        meta = dict(export_result.meta)
+        meta.update({
+            "format": "raw interleaved, no header (I0,Q0,I1,Q1,...)",
+            "output_dtype": output_dtype,
+            "output_peak": output_peak,
+            "output_sample_rate": output_fs,
+            "output_n_samples": len(iq),
+            "output_duration_s": len(iq) / output_fs,
+            "carrier_note": "file is baseband IQ (no carrier/frequency information); "
+                             "set the intended RF center frequency manually on the playback instrument",
+        })
+        iq_bytes = pack_iq_interleaved(iq, output_dtype)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.session_state["export_data"] = {
+            "iq_bytes": iq_bytes,
+            "meta_bytes": json.dumps(meta, indent=2).encode(),
+            "filename": f"qpsk_ccsds_{output_fs/1e6:.1f}Msps_{export_n_cadu}cadu_{timestamp}.iq",
+            "caption": (
+                f"Format: raw interleaved {output_dtype} (I0,Q0,I1,Q1,...) &middot; "
+                f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(iq):,} samples @ "
+                f"{output_fs/1e6:.3f} MS/s &middot; CADU: {export_n_cadu} x {export_result.cadu_bytes} bytes"
+            ),
+        }
         st.session_state["export_key"] = export_key
 
-if "export_result" in st.session_state:
-    export_result = st.session_state["export_result"]
-    interleaved = np.empty(2 * len(export_result.iq), dtype=np.float32)
-    interleaved[0::2] = export_result.iq.real.astype(np.float32)
-    interleaved[1::2] = export_result.iq.imag.astype(np.float32)
-    iq_bytes = interleaved.tobytes()
-    meta_bytes = json.dumps(export_result.meta, indent=2).encode()
-
+if "export_data" in st.session_state:
+    data = st.session_state["export_data"]
     dl_col1, dl_col2 = st.columns([1, 3])
     with dl_col1:
-        st.download_button("Download IQ (.raw)", data=iq_bytes,
-                            file_name=output_filename, mime="application/octet-stream",
+        st.download_button("Download IQ file", data=data["iq_bytes"],
+                            file_name=data["filename"], mime="application/octet-stream",
                             width='stretch')
-        st.download_button("Download metadata (.json)", data=meta_bytes,
-                            file_name=output_filename.rsplit(".", 1)[0] + ".meta.json",
+        st.download_button("Download metadata (.json)", data=data["meta_bytes"],
+                            file_name=data["filename"].rsplit(".", 1)[0] + ".meta.json",
                             mime="application/json", width='stretch')
     with dl_col2:
-        st.caption(
-            f"Format: raw interleaved float32 (I0,Q0,I1,Q1,...) &middot; "
-            f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(export_result.iq):,} samples @ "
-            f"{export_result.sample_rate/1e6:.3f} MS/s &middot; CADU: {len(export_result.symbols)/symbols_per_cadu:.0f} x {export_result.cadu_bytes} bytes"
-        )
+        st.caption(data["caption"])
         if st.session_state.get("export_key") != export_key:
             st.caption("Note: parameters changed since this file was generated -- click 'Generate export file' again to refresh.")
 else:
@@ -497,7 +558,7 @@ with st.expander("See known limitations before use on real hardware"):
 - **Turbo coding and LDPC** (CCSDS 131.0-B-5 sections 6-8) are not implemented -- only Reed-Solomon, convolutional (with puncturing), and their concatenation.
 - **Transfer Frame length constraints** (section 11) are not enforced: some combinations of E / interleave depth / convolutional rate / CADU count can produce an odd number of coded bits, which fails QPSK pairing (shown as an error, not a crash). This never affects the rate-1/2 baseline.
 - **NRZ-L polarity**: bit 1 -> +1, bit 0 -> -1; not yet verified against the receiver/tool's expected polarity.
-- **RF-Catcher IQ converter format** to be confirmed with TestTree.
+- **RF-Catcher's "IQ Converter" tool** may expect its own `.rfcatcher` container format rather than the raw binary produced here -- to be confirmed on real hardware.
 
 Full details in `README.md`.
     """)
