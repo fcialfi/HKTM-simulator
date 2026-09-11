@@ -7,21 +7,15 @@ K=7 rate 1/2 -> NRZ-L -> optional CCSDS scrambler -> QPSK (Gray) -> RRC ->
 raw interleaved float32 IQ.
 
 See README.md for architecture assumptions, limitations, and open TODOs
-before using the output against real ground equipment.
+before using the output against real ground equipment. For an interactive
+GUI with a real-time spectrum view, see `streamlit run app.py`.
 """
 
 import argparse
 import json
-import time
 
-import numpy as np
-
-from ccsds_chain.reed_solomon import rs_encode_interleaved
-from ccsds_chain.convolutional import conv_encode
-from ccsds_chain.scrambler import apply_scrambler
-from ccsds_chain.mapping import bits_to_nrzl, qpsk_gray_map
-from ccsds_chain.pulse_shaping import rrc_taps, pulse_shape
-from ccsds_chain.utils import bytes_to_bits, generate_payload, write_iq_interleaved_float32
+from ccsds_chain.pipeline import ChainParams, run_chain
+from ccsds_chain.utils import write_iq_interleaved_float32
 
 # --------------------------------------------------------------------------
 # PARAMETRI CONFIGURABILI (rif. AWS-OSE-ICD-0063, baseline CCSDS 131.0-B-2)
@@ -72,93 +66,55 @@ def build_cli():
 
 def main():
     args = build_cli()
-    if MODULATION != "QPSK":
-        raise NotImplementedError(f"modulation {MODULATION!r} not implemented (baseline: QPSK)")
-    if ENCODING != "NRZ-L":
-        raise NotImplementedError(f"encoding {ENCODING!r} not implemented (baseline: NRZ-L)")
 
-    fec_rs = FEC_RS and not args.no_rs
-    fec_conv = FEC_CONV and not args.no_conv
-    invert_g2 = CONV_INVERT_G2 and not args.no_invert_g2
-    scrambling = SCRAMBLING or args.scramble
+    params = ChainParams(
+        modulation=MODULATION,
+        encoding=ENCODING,
+        bit_rate=BIT_RATE,
+        symbol_rate=SYMBOL_RATE,
+        sps=args.sps,
+        rrc_alpha=args.alpha,
+        rrc_span=args.span,
+        rs_k=RS_K,
+        rs_n=RS_N,
+        interleave_depth=INTERLEAVE_DEPTH,
+        fec_rs=FEC_RS and not args.no_rs,
+        fec_conv=FEC_CONV and not args.no_conv,
+        conv_invert_g2=CONV_INVERT_G2 and not args.no_invert_g2,
+        scrambling=SCRAMBLING or args.scramble,
+        asm=ASM,
+        n_cadu=args.n_cadu,
+        payload_source=args.payload_source,
+        seed=args.seed,
+    )
 
-    frame_bytes = RS_K * INTERLEAVE_DEPTH
-    t0 = time.time()
-
-    print(f"[1/8] Generazione payload: {args.n_cadu} CADU x {frame_bytes} byte "
-          f"({'file: ' + args.payload_source if args.payload_source else 'pseudo-random, seed=' + str(args.seed)})")
-    payload = generate_payload(args.n_cadu, frame_bytes, args.payload_source, args.seed)
-
-    print(f"[2/8] RS({RS_N},{RS_K}) encode, interleave depth {INTERLEAVE_DEPTH}"
-          f"{' (SKIPPED)' if not fec_rs else ''}")
-    cadus = bytearray()
-    for i in range(args.n_cadu):
-        frame = payload[i * frame_bytes:(i + 1) * frame_bytes]
-        if fec_rs:
-            rs_block = rs_encode_interleaved(frame, RS_K, RS_N, INTERLEAVE_DEPTH)
-        else:
-            # without RS, the "codeblock" is just the raw frame data (test-only mode)
-            rs_block = frame
-        cadus += ASM
-        cadus += rs_block
-    cadu_bytes = len(ASM) + (RS_N * INTERLEAVE_DEPTH if fec_rs else frame_bytes)
-    print(f"       -> {args.n_cadu} CADU x {cadu_bytes} byte = {len(cadus)} byte totali")
-
-    print("[3/8] ASM (0x1ACFFC1D) gia' inserito per CADU")
-
-    bits = bytes_to_bits(bytes(cadus))
-    print(f"[4/8] Convolutional K=7 rate 1/2 (G1=171o, G2=133o, invert_g2={invert_g2})"
-          f"{' (SKIPPED)' if not fec_conv else ''}")
-    coded_bits = conv_encode(bits, invert_g2=invert_g2) if fec_conv else bits
-
+    print(f"[1/8] Generazione payload: {params.n_cadu} CADU x {params.rs_k * params.interleave_depth} byte "
+          f"({'file: ' + params.payload_source if params.payload_source else 'pseudo-random, seed=' + str(params.seed)})")
+    print(f"[2/8] RS({params.rs_n},{params.rs_k}) encode, interleave depth {params.interleave_depth}"
+          f"{' (SKIPPED)' if not params.fec_rs else ''}")
+    print("[3/8] ASM (0x1ACFFC1D) inserito per CADU")
+    print(f"[4/8] Convolutional K=7 rate 1/2 (G1=171o, G2=133o, invert_g2={params.conv_invert_g2})"
+          f"{' (SKIPPED)' if not params.fec_conv else ''}")
     print("[5/8] NRZ-L mapping (bipolare diretto)")
-    bipolar = bits_to_nrzl(coded_bits)
-
-    print(f"[6/8] Scrambler CCSDS (seed 0xFF){'' if scrambling else ' (SKIPPED)'}")
-    if scrambling:
-        bipolar = apply_scrambler(bipolar)
-
+    print(f"[6/8] Scrambler CCSDS (seed 0xFF){'' if params.scrambling else ' (SKIPPED)'}")
     print("[7/8] QPSK mapping (Gray, energia unitaria)")
-    symbols = qpsk_gray_map(bipolar)
+    print(f"[8/8] Pulse shaping RRC (alpha={params.rrc_alpha}, span={params.rrc_span}, sps={params.sps})")
 
-    print(f"[8/8] Pulse shaping RRC (alpha={args.alpha}, span={args.span}, sps={args.sps})")
-    taps = rrc_taps(args.alpha, args.span, args.sps)
-    iq = pulse_shape(symbols, args.sps, taps)
+    result = run_chain(params)
 
-    write_iq_interleaved_float32(args.output, iq)
+    print(f"       -> {params.n_cadu} CADU x {result.cadu_bytes} byte")
 
-    sample_rate = SYMBOL_RATE * args.sps
-    meta = {
-        "modulation": MODULATION,
-        "encoding": ENCODING,
-        "bit_rate": BIT_RATE,
-        "symbol_rate": SYMBOL_RATE,
-        "sample_rate": sample_rate,
-        "samples_per_symbol": args.sps,
-        "rrc_alpha": args.alpha,
-        "rrc_span": args.span,
-        "fec_rs": fec_rs,
-        "fec_conv": fec_conv,
-        "conv_invert_g2": invert_g2,
-        "scrambling": scrambling,
-        "rs_k": RS_K,
-        "rs_n": RS_N,
-        "interleave_depth": INTERLEAVE_DEPTH,
-        "n_cadu": args.n_cadu,
-        "n_symbols": len(symbols),
-        "n_iq_samples": len(iq),
-        "format": "raw interleaved float32 (I0,Q0,I1,Q1,...)",
-    }
+    write_iq_interleaved_float32(args.output, result.iq)
+
     meta_path = args.output.rsplit(".", 1)[0] + ".meta.json"
     with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
+        json.dump(result.meta, f, indent=2)
 
-    dt = time.time() - t0
-    duration_s = len(symbols) / SYMBOL_RATE
-    print(f"\nCompletato in {dt:.2f}s")
-    print(f"  Simboli QPSK: {len(symbols)}  (durata segnale: {duration_s * 1000:.2f} ms)")
-    print(f"  Campioni IQ:  {len(iq)}  @ {sample_rate / 1e6:.3f} MS/s")
-    print(f"  Output:       {args.output} ({len(iq) * 8 / 1e6:.2f} MB)")
+    duration_s = len(result.symbols) / SYMBOL_RATE
+    print(f"\nCompletato in {result.elapsed:.2f}s")
+    print(f"  Simboli QPSK: {len(result.symbols)}  (durata segnale: {duration_s * 1000:.2f} ms)")
+    print(f"  Campioni IQ:  {len(result.iq)}  @ {result.sample_rate / 1e6:.3f} MS/s")
+    print(f"  Output:       {args.output} ({len(result.iq) * 8 / 1e6:.2f} MB)")
     print(f"  Metadata:     {meta_path}")
 
 
