@@ -11,15 +11,23 @@ def bytes_to_bits(data: bytes) -> np.ndarray:
 
 
 def generate_payload(n_cadu: int, frame_bytes: int, source_path: str | None = None,
-                      seed: int | None = 42) -> bytes:
+                      source_bytes: bytes | None = None, seed: int | None = 42) -> bytes:
     """Build the concatenated data-zone payload for `n_cadu` CADUs.
 
-    With no `source_path`, generates reproducible pseudo-random test data.
-    With a `source_path`, reads real Transfer Frame bytes sequentially from
-    the file; if the file is shorter than needed it is zero-padded (the file
-    is not looped, to avoid silently repeating frames).
+    With neither `source_path` nor `source_bytes`, generates reproducible
+    pseudo-random test data. With a source (file path, or raw bytes already
+    read e.g. from a GUI upload), real Transfer Frame bytes are used
+    sequentially; if shorter than needed it is zero-padded (not looped, to
+    avoid silently repeating frames).
     """
     total_bytes = n_cadu * frame_bytes
+
+    if source_bytes is not None:
+        data = source_bytes[:total_bytes]
+        if len(data) < total_bytes:
+            data = data + bytes(total_bytes - len(data))
+        return data
+
     if source_path is None:
         rng = np.random.default_rng(seed)
         return rng.integers(0, 256, size=total_bytes, dtype=np.uint8).tobytes()
