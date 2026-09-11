@@ -7,6 +7,23 @@ Application**.
 Riferimenti: AWS-OSE-ICD-0063 (Arctic Weather Satellite downlink),
 CCSDS 131.0-B-2 (TM Synchronization and Channel Coding), ECSS-E-ST-50-01C.
 
+## Struttura del progetto
+
+```
+app.py                  GUI (Streamlit) con spettro/costellazione real-time
+generate_signal.py      CLI, genera output_iq.raw + metadata
+verify_spectrum.py      CLI, verifica banda occupata di un file IQ esistente
+ccsds_chain/
+  pipeline.py            orchestrazione della catena (usata da app.py e generate_signal.py)
+  reed_solomon.py         RS(255,223) + interleaving
+  convolutional.py        convoluzionale K=7 rate 1/2
+  scrambler.py             LFSR CCSDS
+  mapping.py               NRZ-L + QPSK Gray
+  pulse_shaping.py         filtro RRC
+  spectrum.py              PSD/banda occupata (usato da app.py e verify_spectrum.py)
+  utils.py                 bit/byte helpers, I/O file IQ
+```
+
 ## Parametri baseline
 
 | Parametro       | Valore baseline          | Selezionabile |
@@ -51,7 +68,29 @@ payload -> RS(255,223) interleave x5 -> + ASM -> conv. K=7 r=1/2
 
 ```bash
 pip install -r requirements.txt
+```
 
+### GUI (consigliata)
+
+```bash
+streamlit run app.py
+```
+
+Apre un'interfaccia grafica (dark theme) con tutti i parametri della catena
+nella sidebar. **Ogni modifica a un parametro ricalcola la catena e
+aggiorna in tempo reale**: spettro (PSD con banda -3dB/-20dB evidenziata),
+costellazione QPSK, estratto I/Q nel tempo, e le metriche (banda occupata,
+durata segnale, tempo di calcolo). Include un indicatore visivo degli
+stadi della pipeline attivi/disattivi ed export diretto del file IQ +
+metadata dal browser (pulsanti "Scarica").
+
+`app.py` e `generate_signal.py` condividono la stessa implementazione della
+catena (`ccsds_chain/pipeline.py`): non c'e' rischio che GUI e CLI si
+disallineino.
+
+### CLI
+
+```bash
 python generate_signal.py                       # parametri baseline
 python generate_signal.py --n-cadu 500 --scramble -o test.raw
 
