@@ -142,10 +142,61 @@ with st.sidebar:
         st.caption(f"Symbol rate (derived): {symbol_rate:,.0f} S/s".replace(",", " "))
 
     st.markdown("### FEC")
-    fec_rs = st.checkbox("Reed-Solomon (255,223) interleave x5", value=True)
-    fec_conv = st.checkbox("Convolutional K=7 rate 1/2", value=True)
-    invert_g2 = st.checkbox("Invert G2 (CCSDS convention)", value=True, disabled=not fec_conv)
-    scrambling = st.checkbox("CCSDS scrambler (LFSR seed 0xFF)", value=False)
+    fec_rs = st.checkbox("Reed-Solomon", value=True)
+    rs_col1, rs_col2 = st.columns(2)
+    with rs_col1:
+        rs_e = st.selectbox(
+            "Error correction E", [16, 8], disabled=not fec_rs,
+            help=(
+                "RS error-correction capability, in symbols (CCSDS 4.3.1, managed "
+                "parameter 12.5). E=16 gives RS(255,223): more parity overhead, "
+                "corrects up to 16 symbol errors per codeword. E=8 gives "
+                "RS(255,239): less overhead, corrects up to 8."
+            ),
+        )
+    with rs_col2:
+        interleave_depth = st.selectbox(
+            "Interleave depth I", [1, 2, 3, 4, 5, 8], index=4, disabled=not fec_rs,
+            help=(
+                "Number of RS codewords interleaved together per CADU (CCSDS "
+                "4.3.5, managed parameter 12.5). Higher I spreads a burst error "
+                "across more codewords (each corrects a smaller share of it) at "
+                "the cost of a larger CADU."
+            ),
+        )
+    rs_k = 255 - 2 * rs_e
+
+    fec_conv = st.checkbox("Convolutional K=7", value=True)
+    conv_rate = st.selectbox(
+        "Code rate", ["1/2", "2/3", "3/4", "5/6", "7/8"], disabled=not fec_conv,
+        help=(
+            "Convolutional code rate via puncturing (CCSDS 3.4, Table 3-1, "
+            "managed parameter 12.4). Higher rate transmits fewer coded symbols "
+            "per input bit (less bandwidth overhead) at the cost of weaker error "
+            "correction. Rate 1/2 is the base, unpunctured code."
+        ),
+    )
+    invert_g2 = st.checkbox(
+        "Invert G2 (CCSDS convention)", value=True,
+        disabled=not fec_conv or conv_rate != "1/2",
+        help=(
+            "G2 output symbol inversion (CCSDS 3.3.1(5)), needed at rate 1/2 to "
+            "guarantee bit transitions for BPSK symbol synchronizers. Punctured "
+            "codes (any rate other than 1/2) use no inversion (3.4.1(5))."
+        ),
+    )
+
+    randomizer_label = st.selectbox(
+        "Pseudo-randomizer", ["Long (131071-bit)", "Short (255-bit, legacy)", "None"],
+        help=(
+            "CCSDS section 10: scrambles the RS-coded data (never the ASM) to "
+            "guarantee bit transitions, avoid spectral lines, and aid receiver "
+            "acquisition. 'Long' is the current standard default (Issue 5, "
+            "2023, managed parameter 12.3); 'Short' is kept only for backward "
+            "compatibility with legacy systems."
+        ),
+    )
+    randomizer = {"Long (131071-bit)": "long", "Short (255-bit, legacy)": "short", "None": "none"}[randomizer_label]
 
     st.markdown("### Pulse Shaping (RRC)")
     st.caption("Shapes the QPSK symbols into a band-limited waveform (Root-Raised-Cosine filter) before D/A conversion.")
@@ -210,10 +261,13 @@ params = ChainParams(
     sps=int(sps),
     rrc_alpha=float(rrc_alpha),
     rrc_span=int(rrc_span),
+    rs_e=int(rs_e),
+    interleave_depth=int(interleave_depth),
     fec_rs=fec_rs,
     fec_conv=fec_conv,
+    conv_rate=conv_rate,
     conv_invert_g2=invert_g2,
-    scrambling=scrambling,
+    randomizer=randomizer,
     n_cadu=int(n_cadu),
     payload_bytes=payload_source_bytes,
     seed=int(seed),
@@ -226,11 +280,11 @@ def chip(label, active):
 
 stages_html = '<div class="stage-row">' + '<span class="arrow">&rarr;</span>'.join([
     chip("PAYLOAD", True),
-    chip("RS(255,223)", fec_rs),
+    chip(f"RS(255,{rs_k}) I={interleave_depth}", fec_rs),
+    chip(randomizer_label.split(" ")[0].upper(), randomizer != "none"),
     chip("+ASM", True),
-    chip("CONV K=7 r=1/2", fec_conv),
+    chip(f"CONV K=7 r={conv_rate}", fec_conv),
     chip("NRZ-L", True),
-    chip("SCRAMBLER", scrambling),
     chip("QPSK GRAY", True),
     chip(f"RRC &alpha;={rrc_alpha:.2f}", True),
 ]) + '</div>'
@@ -394,8 +448,9 @@ with exp_col2:
     )
     with st.expander("See known limitations before use on real hardware"):
         st.markdown("""
-- **RS Alpha/Beta**: uses `reedsolo`'s default GF(256) parameters, not verified against the CCSDS representation expected by the receiver.
-- **Scrambler bit-order convention**: the LFSR is a standard Fibonacci implementation, not yet cross-checked bit-for-bit against the CCSDS 131.0-B-2 reference sequence table.
+- **Turbo coding and LDPC** (CCSDS 131.0-B-5 sections 6-8) are not implemented -- only Reed-Solomon, convolutional (with puncturing), and their concatenation.
+- **Transfer Frame length constraints** (section 11) are not enforced: some combinations of E / interleave depth / convolutional rate / CADU count can produce an odd number of coded bits, which fails QPSK pairing (shown as an error, not a crash). This never affects the rate-1/2 baseline.
+- **NRZ-L polarity**: bit 1 -> +1, bit 0 -> -1; not yet verified against the receiver/tool's expected polarity.
 - **RF-Catcher IQ converter format** to be confirmed with TestTree.
 
 Full details in `README.md`.
