@@ -8,7 +8,7 @@ import numpy as np
 
 from .reed_solomon import rs_encode_interleaved
 from .convolutional import conv_encode
-from .scrambler import scramble_bits
+from .scrambler import pn_sequence
 from .mapping import bits_to_nrzl, qpsk_gray_map
 from .pulse_shaping import rrc_taps, pulse_shape
 from .utils import bytes_to_bits, generate_payload
@@ -25,18 +25,23 @@ class ChainParams:
     sps: int = 4
     rrc_alpha: float = 0.35
     rrc_span: int = 8
-    rs_k: int = 223
+    rs_e: int = 16  # error-correction capability, in symbols: 8 or 16 (12.5)
     rs_n: int = 255
-    interleave_depth: int = 5
+    interleave_depth: int = 5  # 1, 2, 3, 4, 5, or 8 (12.5)
     fec_rs: bool = True
     fec_conv: bool = True
-    conv_invert_g2: bool = True
-    scrambling: bool = False
+    conv_rate: str = "1/2"  # 1/2, 2/3, 3/4, 5/6, or 7/8 (12.4)
+    conv_invert_g2: bool = True  # only applies at rate 1/2 (3.4.1(5): punctured codes use no inversion)
+    randomizer: str = "none"  # "none", "short" (255-bit, legacy), "long" (131071-bit, default per 12.3)
     asm: bytes = ASM
     n_cadu: int = 100
     payload_source: str | None = None
     payload_bytes: bytes | None = None
     seed: int = 42
+
+    @property
+    def rs_k(self) -> int:
+        return self.rs_n - 2 * self.rs_e
 
 
 @dataclass
@@ -70,25 +75,31 @@ def run_chain(p: ChainParams) -> ChainResult:
     # needed to decode it), and frame sync is recovered by correlating for
     # the literal ASM pattern in the *decoded* bitstream, not before
     # decoding. The pseudo-randomizer is reinitialized for each CADU's
-    # codeblock (not carried over between CADUs).
+    # codeblock (not carried over between CADUs) -- since every CADU's
+    # codeblock is the same length, it is always reinitialized to the same
+    # state, so the PN sequence is generated once and reused rather than
+    # regenerated (an O(bits) pure-Python LFSR) on every iteration.
     asm_bits = bytes_to_bits(p.asm)
+    rs_block_bytes = p.rs_n * p.interleave_depth if p.fec_rs else frame_bytes
+    pn = pn_sequence(rs_block_bytes * 8, p.randomizer) if p.randomizer != "none" else None
     cadu_bit_chunks = []
     for i in range(p.n_cadu):
         frame = payload[i * frame_bytes:(i + 1) * frame_bytes]
         rs_block = (rs_encode_interleaved(frame, p.rs_k, p.rs_n, p.interleave_depth)
                     if p.fec_rs else frame)
         rs_bits = bytes_to_bits(rs_block)
-        if p.scrambling:
-            rs_bits = scramble_bits(rs_bits)
+        if pn is not None:
+            rs_bits = np.bitwise_xor(rs_bits, pn)
         cadu_bit_chunks.append(asm_bits)
         cadu_bit_chunks.append(rs_bits)
-    cadu_bytes = len(p.asm) + (p.rs_n * p.interleave_depth if p.fec_rs else frame_bytes)
+    cadu_bytes = len(p.asm) + rs_block_bytes
 
     bits = np.concatenate(cadu_bit_chunks)
     # Convolutional coding stays continuous across the whole burst (the
     # register is never reset per CADU), matching a physical coder running
     # continuously across the channel.
-    coded_bits = conv_encode(bits, invert_g2=p.conv_invert_g2) if p.fec_conv else bits
+    coded_bits = (conv_encode(bits, invert_g2=p.conv_invert_g2, rate=p.conv_rate)
+                  if p.fec_conv else bits)
 
     bipolar = bits_to_nrzl(coded_bits)
     symbols = qpsk_gray_map(bipolar)
@@ -110,8 +121,10 @@ def run_chain(p: ChainParams) -> ChainResult:
         "rrc_span": p.rrc_span,
         "fec_rs": p.fec_rs,
         "fec_conv": p.fec_conv,
-        "conv_invert_g2": p.conv_invert_g2,
-        "scrambling": p.scrambling,
+        "conv_rate": p.conv_rate,
+        "conv_invert_g2": p.conv_invert_g2 and p.conv_rate == "1/2",
+        "randomizer": p.randomizer,
+        "rs_e": p.rs_e,
         "rs_k": p.rs_k,
         "rs_n": p.rs_n,
         "interleave_depth": p.interleave_depth,
