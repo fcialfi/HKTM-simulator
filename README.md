@@ -39,25 +39,35 @@ ccsds_chain/
 
 ## Catena implementata
 
+Segue la struttura ufficiale CCSDS 131.0-B-3 ("Overall Structure of Channel
+Coding"): RS encode -> pseudo-random -> attach ASM (= CADU) -> convoluzionale
+sul flusso di CADU:
+
 ```
-payload -> RS(255,223) interleave x5 -> + ASM -> conv. K=7 r=1/2
-        -> NRZ-L -> [scrambler] -> QPSK (Gray) -> RRC -> IQ float32
+payload -> RS(255,223) interleave x5 -> [scrambler, esclude ASM]
+        -> + ASM (per CADU, forma il CADU) -> conv. K=7 r=1/2 (sul flusso di CADU)
+        -> NRZ-L -> QPSK (Gray) -> RRC -> IQ float32
 ```
 
 1. **Payload**: dati pseudo-casuali riproducibili (seed) per CADU, oppure
    Transfer Frame reali da file (`--payload-source`).
 2. **RS(255,223)** con interleaving a profondita' 5 (byte `i` va nel
    sotto-stream `i mod 5`); libreria `reedsolo`.
-3. **ASM** (4 byte) prepeso in chiaro a ogni CADU.
-4. **Convoluzionale** K=7 rate 1/2, polinomi CCSDS 171/133 ottale, applicato
-   in modo continuo sull'intero flusso di bit concatenato (ASM incluso; vedi
-   Limitazioni), con stato del registro azzerato una sola volta all'inizio
-   dell'intero segnale (non per-CADU).
-5. **NRZ-L**: mapping bipolare diretto (bit 1 -> +1, bit 0 -> -1), nessuna
+3. **Scrambler CCSDS** (opzionale): LFSR polinomio 1+x^3+x^5+x^7+x^8, seed
+   0xFF, applicato via XOR bit-a-bit al solo blocco RS-codificato di ogni
+   CADU (mai all'ASM), reinizializzato a ogni CADU.
+4. **ASM** (4 byte, `0x1ACFFC1D`) prepeso al blocco (scramblato o meno) di
+   ogni CADU -- questo e' letteralmente cio' che CCSDS chiama CADU.
+5. **Convoluzionale** K=7 rate 1/2, polinomi CCSDS 171/133 ottale, applicato
+   in modo continuo sull'intero flusso di CADU concatenati (ASM incluso),
+   con stato del registro azzerato una sola volta all'inizio dell'intero
+   segnale (non per-CADU). L'ASM viene quindi convoluzionalmente codificato
+   insieme al resto: per un flusso convoluzionale la sincronizzazione di
+   frame lato ricevitore si ottiene correlando l'ASM nel bitstream **gia'
+   decodificato** (Viterbi decodifica in continuo, senza bisogno di sync
+   preventiva), non prima della decodifica.
+6. **NRZ-L**: mapping bipolare diretto (bit 1 -> +1, bit 0 -> -1), nessuna
    codifica differenziale.
-6. **Scrambler CCSDS** (opzionale): LFSR polinomio 1+x^3+x^5+x^7+x^8, seed
-   0xFF, applicato per moltiplicazione nel dominio bipolare (equivalente a
-   uno XOR bit-a-bit prima del mapping NRZ-L).
 7. **QPSK Gray**: coppie di campioni bipolari -> I/Q, normalizzati a
    energia media unitaria per simbolo.
 8. **Pulse shaping RRC** (alpha configurabile, default 0.35).
@@ -112,15 +122,6 @@ opzioni piu' comuni sono anche esposte via CLI (`--help`).
   aggiuntiva non ancora implementata. I parametri RS (`RS_FCR`, `RS_PRIM`,
   `RS_GENERATOR` in `ccsds_chain/reed_solomon.py`) sono isolati per poter
   essere corretti una volta confermati i requisiti del ricevitore.
-- **ASM e stadio convoluzionale/scrambler**: l'implementazione segue
-  l'ordine letterale richiesto (RS -> +ASM -> convoluzionale -> NRZ-L ->
-  scrambler -> QPSK), quindi l'ASM viene codificato convoluzionalmente
-  insieme al resto del CADU, e (se lo scrambler e' attivo) e' incluso anche
-  nello scrambling. In molte implementazioni CCSDS reali l'ASM resta
-  **non randomizzato** (per permettere la sincronizzazione diretta sul
-  pattern noto) e la codifica convoluzionale dell'ASM e' un punto che varia
-  tra sistemi. Questa e' una semplificazione/assunzione da validare (vedi
-  TODO).
 - **Convenzione scrambler**: il LFSR CCSDS e' implementato come Fibonacci
   LFSR standard, ma l'esatta convenzione di bit-order/tap di uscita non e'
   stata verificata contro la sequenza di riferimento CCSDS 131.0-B-2.
@@ -141,8 +142,6 @@ opzioni piu' comuni sono anche esposte via CLI (`--help`).
 - [ ] Confermare formato input IQ Converter (contattare support@test-tree.com
       se necessario)
 - [ ] Verificare rappresentazione RS Alpha/Beta richiesta dal ricevitore
-- [ ] Validare scrambling (se applicato su ASM+dati o solo dati)
-- [ ] Validare inclusione/esclusione dell'ASM nella codifica convoluzionale
 - [ ] Verificare convenzione bit-order del LFSR scrambler contro la
       sequenza di riferimento CCSDS 131.0-B-2
 - [ ] Verificare polarita' NRZ-L attesa

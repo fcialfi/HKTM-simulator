@@ -395,7 +395,7 @@ with exp_col2:
     with st.expander("See known limitations before use on real hardware"):
         st.markdown("""
 - **RS Alpha/Beta**: uses `reedsolo`'s default GF(256) parameters, not verified against the CCSDS representation expected by the receiver.
-- **ASM** is included in the convolutional coding (and in scrambling, if enabled), following the literal order of the requested chain -- to be validated.
+- **Scrambler bit-order convention**: the LFSR is a standard Fibonacci implementation, not yet cross-checked bit-for-bit against the CCSDS 131.0-B-2 reference sequence table.
 - **RF-Catcher IQ converter format** to be confirmed with TestTree.
 
 Full details in `README.md`.
