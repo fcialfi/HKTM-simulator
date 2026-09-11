@@ -36,6 +36,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: radial-gradient(ellipse 120% 80% at 50% -10%, #142033 0%, #0b0f19 55%); }
 
 #MainMenu, footer, header { visibility: hidden; }
+[data-testid="collapsedControl"] { visibility: visible; }
 
 .hktm-header {
     display: flex; align-items: center; justify-content: space-between;
