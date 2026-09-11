@@ -35,9 +35,12 @@ def ccsds_pn_sequence(n_bits: int, seed: int = SEED) -> np.ndarray:
     return np.tile(period, reps)[:n_bits]
 
 
-def apply_scrambler(bipolar: np.ndarray, seed: int = SEED) -> np.ndarray:
-    """Multiplicative scrambling in the bipolar (NRZ-L) domain: equivalent
-    to XOR-scrambling the bits before NRZ-L mapping."""
-    pn = ccsds_pn_sequence(len(bipolar), seed)
-    pn_bipolar = 1 - 2 * pn.astype(np.float64)
-    return bipolar * pn_bipolar
+def scramble_bits(bits: np.ndarray, seed: int = SEED) -> np.ndarray:
+    """XOR-scramble a bitstream with the CCSDS PN sequence.
+
+    Per CCSDS 131.0-B-3, randomization is applied to the RS-coded data
+    *before* convolutional encoding (and never to the ASM), so this
+    operates directly on bits rather than on the bipolar/NRZ-L domain.
+    """
+    pn = ccsds_pn_sequence(len(bits), seed)
+    return np.bitwise_xor(bits.astype(np.uint8), pn)

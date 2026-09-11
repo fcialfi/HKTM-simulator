@@ -18,6 +18,8 @@ import streamlit as st
 from ccsds_chain.pipeline import ChainParams, run_chain
 from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth
 
+BITS_PER_SYMBOL = {"QPSK": 2}
+
 st.set_page_config(
     page_title="HKTM CCSDS Signal Generator",
     page_icon="📡",
@@ -70,6 +72,7 @@ header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"] span { colo
     background: linear-gradient(160deg, #131a2a 0%, #0f1522 100%);
     border: 1px solid rgba(255,255,255,0.07);
     border-radius: 12px; padding: 0.85rem 1rem; height: 100%;
+    cursor: help;
 }
 .metric-card .label { font-size: 0.72rem; color: #7d90ac; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
 .metric-card .value { font-family: 'JetBrains Mono', monospace; font-size: 1.35rem; color: #eaf6ff; font-weight: 600; margin-top: 2px; }
@@ -115,40 +118,86 @@ st.markdown("""
 # Sidebar controls
 # --------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### Modulazione & Encoding")
-    modulation = st.selectbox("Modulazione", ["QPSK"], help="Baseline. Altre modulazioni: roadmap.")
-    encoding = st.selectbox("Encoding di linea", ["NRZ-L"], help="Baseline. Altri encoding: roadmap.")
-    symbol_rate = st.number_input("Symbol rate (S/s)", value=1_785_000, step=1_000, format="%d")
-    bit_rate = st.number_input("Bit rate (bps, informativo)", value=3_570_000, step=1_000, format="%d")
+    st.markdown("### Modulation & Encoding")
+    modulation = st.selectbox("Modulation", ["QPSK"], help="Baseline. Other modulations: roadmap.")
+    encoding = st.selectbox("Line encoding", ["NRZ-L"], help="Baseline. Other encodings: roadmap.")
+
+    bits_per_symbol = BITS_PER_SYMBOL[modulation]
+    rate_ref = st.radio(
+        "Rate input", ["Symbol rate", "Bit rate"], horizontal=True,
+        help=(
+            "Symbol rate and bit rate aren't independent: for a given modulation "
+            f"(here {modulation} = {bits_per_symbol} bits/symbol), bit rate = symbol rate x "
+            "bits/symbol. Pick which one you want to drive directly -- the other is "
+            "derived automatically so they can never go out of sync."
+        ),
+    )
+    if rate_ref == "Symbol rate":
+        symbol_rate = st.number_input("Symbol rate (S/s)", value=1_785_000, step=1_000, format="%d")
+        bit_rate = symbol_rate * bits_per_symbol
+        st.caption(f"Bit rate (derived): {bit_rate:,.0f} bps".replace(",", " "))
+    else:
+        bit_rate = st.number_input("Bit rate (bps)", value=3_570_000, step=1_000, format="%d")
+        symbol_rate = bit_rate // bits_per_symbol
+        st.caption(f"Symbol rate (derived): {symbol_rate:,.0f} S/s".replace(",", " "))
 
     st.markdown("### FEC")
     fec_rs = st.checkbox("Reed-Solomon (255,223) interleave x5", value=True)
-    fec_conv = st.checkbox("Convoluzionale K=7 rate 1/2", value=True)
-    invert_g2 = st.checkbox("Invert G2 (convenzione CCSDS)", value=True, disabled=not fec_conv)
-    scrambling = st.checkbox("Scrambler CCSDS (LFSR seed 0xFF)", value=False)
+    fec_conv = st.checkbox("Convolutional K=7 rate 1/2", value=True)
+    invert_g2 = st.checkbox("Invert G2 (CCSDS convention)", value=True, disabled=not fec_conv)
+    scrambling = st.checkbox("CCSDS scrambler (LFSR seed 0xFF)", value=False)
 
     st.markdown("### Pulse Shaping (RRC)")
-    rrc_alpha = st.slider("Roll-off alpha", 0.05, 1.00, 0.35, 0.01)
-    rrc_span = st.slider("Span (simboli)", 4, 16, 8, 1)
-    sps = st.select_slider("Samples/simbolo", options=[2, 4, 8], value=4)
+    st.caption("Shapes the QPSK symbols into a band-limited waveform (Root-Raised-Cosine filter) before D/A conversion.")
+    rrc_alpha = st.slider(
+        "Roll-off (alpha)", 0.05, 1.00, 0.35, 0.01,
+        help=(
+            "Excess-bandwidth factor of the RRC filter (0-1). Trades occupied "
+            "bandwidth against tolerance to timing/synchronization error: lower "
+            "alpha keeps the occupied bandwidth close to the symbol rate but makes "
+            "pulses sharper and more sensitive to timing offsets; higher alpha "
+            "widens the occupied bandwidth toward 2x the symbol rate but gives "
+            "smoother, more timing-tolerant pulses. Theoretical occupied bandwidth "
+            "= symbol rate x (1 + alpha). CCSDS commonly uses 0.35."
+        ),
+    )
+    rrc_span = st.slider(
+        "Span (symbols)", 4, 16, 8, 1,
+        help=(
+            "Length of the RRC filter's impulse response, in symbol periods. A "
+            "longer span approximates the ideal (infinite) RRC filter more "
+            "closely and reduces residual inter-symbol interference, at the cost "
+            "of a longer start/end transient (group delay = span/2 symbols) and "
+            "more computation."
+        ),
+    )
+    sps = st.select_slider(
+        "Samples/symbol", options=[2, 4, 8], value=4,
+        help=(
+            "Oversampling factor: number of I/Q samples generated per symbol. "
+            "Sets the output sample rate = symbol rate x samples/symbol. Needs to "
+            "be high enough to represent the occupied bandwidth (roughly "
+            "symbol rate x (1 + alpha)) without aliasing."
+        ),
+    )
 
-    st.markdown("### Payload & Durata")
-    n_cadu = st.slider("N. CADU", 5, 300, 40, 5,
-                        help="Numero di CADU generati. Controlla sia l'anteprima real-time sia il file esportato.")
-    payload_mode = st.radio("Sorgente payload", ["Pseudo-random", "File Transfer Frame"], horizontal=True)
+    st.markdown("### Payload & Duration")
+    n_cadu = st.slider("CADU count", 5, 300, 40, 5,
+                        help="Number of CADUs generated. Controls both the real-time preview and the exported file.")
+    payload_mode = st.radio("Payload source", ["Pseudo-random", "Transfer Frame file"], horizontal=True)
     payload_source_bytes = None
     seed = 42
     if payload_mode == "Pseudo-random":
         seed = st.number_input("Seed", value=42, step=1)
     else:
-        uploaded = st.file_uploader("Transfer Frame (binario)", type=None)
+        uploaded = st.file_uploader("Transfer Frame (binary)", type=None)
         if uploaded is not None:
             payload_source_bytes = uploaded.read()
         else:
-            st.caption("Nessun file caricato: uso pseudo-random come fallback.")
+            st.caption("No file uploaded: falling back to pseudo-random.")
 
     st.markdown("### Output")
-    output_filename = st.text_input("Nome file IQ", value="output_iq.raw")
+    output_filename = st.text_input("IQ file name", value="output_iq.raw")
 
 # --------------------------------------------------------------------------
 # Build params & run chain
@@ -187,7 +236,7 @@ stages_html = '<div class="stage-row">' + '<span class="arrow">&rarr;</span>'.jo
 ]) + '</div>'
 st.markdown(stages_html, unsafe_allow_html=True)
 
-with st.spinner("Ricalcolo catena CCSDS..."):
+with st.spinner("Recomputing CCSDS chain..."):
     try:
         result = run_chain(params)
         error = None
@@ -196,7 +245,7 @@ with st.spinner("Ricalcolo catena CCSDS..."):
         error = str(exc)
 
 if error:
-    st.error(f"Errore nella catena di generazione: {error}")
+    st.error(f"Error in the generation chain: {error}")
     st.stop()
 
 duration_ms = len(result.symbols) / params.symbol_rate * 1000
@@ -207,7 +256,7 @@ duration_ms = len(result.symbols) / params.symbol_rate * 1000
 nperseg = 4096
 n_segs = len(result.iq) // nperseg
 if n_segs < 1:
-    st.warning("Segnale troppo corto per l'analisi spettrale con questi parametri: aumenta N. CADU.")
+    st.warning("Signal too short for spectral analysis with these parameters: increase the CADU count.")
     st.stop()
 
 psd = welch_psd(result.iq, nperseg)
@@ -217,22 +266,32 @@ db = 10 * np.log10(psd / peak)
 
 bw_3db = contiguous_bandwidth(freqs, db, -3.0)
 bw_20db = contiguous_bandwidth(freqs, db, -20.0)
+bw_theoretical = params.symbol_rate * (1 + params.rrc_alpha)
 
 # --------------------------------------------------------------------------
 # Metric cards
 # --------------------------------------------------------------------------
-cols = st.columns(6)
+cols = st.columns(7)
 metrics = [
-    ("Banda -3dB", f"{bw_3db/1e6:.3f}", "MHz", "accent"),
-    ("Banda -20dB", f"{bw_20db/1e6:.3f}", "MHz", "accent"),
-    ("Durata segnale", f"{duration_ms:.1f}", "ms", ""),
-    ("Sample rate", f"{result.sample_rate/1e6:.3f}", "MS/s", ""),
-    ("Simboli QPSK", f"{len(result.symbols):,}".replace(",", " "), "", ""),
-    ("Tempo calcolo", f"{result.elapsed*1000:.0f}", "ms", "warn" if result.elapsed > 1.0 else ""),
+    ("-3dB Bandwidth", f"{bw_3db/1e6:.3f}", "MHz", "accent",
+     "Width where the measured PSD stays within 3 dB of its peak. For an RRC-shaped "
+     "signal this sits at +/-Rs/2 almost regardless of roll-off, so it tracks the "
+     "symbol rate rather than the roll-off."),
+    ("-20dB Bandwidth", f"{bw_20db/1e6:.3f}", "MHz", "accent",
+     "Width where the measured PSD stays within 20 dB of its peak. Grows with the "
+     "roll-off alpha, approaching the theoretical occupied bandwidth at high alpha."),
+    ("Occupied BW (theoretical)", f"{bw_theoretical/1e6:.3f}", "MHz", "accent",
+     "Theoretical RRC spectral edge = symbol rate x (1 + alpha). Not a live "
+     "measurement -- compare it against the -20dB bandwidth above."),
+    ("Signal duration", f"{duration_ms:.1f}", "ms", "", "Length of the generated burst."),
+    ("Sample rate", f"{result.sample_rate/1e6:.3f}", "MS/s", "", "Symbol rate x samples/symbol."),
+    ("QPSK symbols", f"{len(result.symbols):,}".replace(",", " "), "", "", "Total number of QPSK symbols generated."),
+    ("Compute time", f"{result.elapsed*1000:.0f}", "ms", "warn" if result.elapsed > 1.0 else "",
+     "Wall-clock time to run the full chain for this preview."),
 ]
-for col, (label, value, unit, style) in zip(cols, metrics):
+for col, (label, value, unit, style, tooltip) in zip(cols, metrics):
     col.markdown(f"""
-    <div class="metric-card {style}">
+    <div class="metric-card {style}" title="{tooltip}">
       <div class="label">{label}</div>
       <div class="value">{value}<span class="unit">{unit}</span></div>
     </div>""", unsafe_allow_html=True)
@@ -258,8 +317,8 @@ with spec_col:
                   annotation_text="-20 dB", annotation_position="top left",
                   annotation_font_color="#ff5c7a")
     fig.update_layout(
-        title="Spettro (PSD) -- real-time",
-        xaxis_title="Frequenza (MHz)", yaxis_title="PSD relativa (dB)",
+        title="Spectrum (PSD) -- real-time",
+        xaxis_title="Frequency (MHz)", yaxis_title="Relative PSD (dB)",
         template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         height=460, margin=dict(l=10, r=10, t=50, b=10),
         yaxis=dict(range=[-70, 5], gridcolor="rgba(255,255,255,0.06)"),
@@ -267,6 +326,11 @@ with spec_col:
         showlegend=False,
     )
     st.plotly_chart(fig, width='stretch')
+    st.caption(
+        "Note: the -3dB bandwidth (dashed orange) stays close to the symbol rate for "
+        "any roll-off -- it's the -20dB line (dashed red) and the 'Occupied BW "
+        "(theoretical)' metric above that grow with alpha."
+    )
 
 with side_col:
     n_preview = min(3000, len(result.symbols))
@@ -278,7 +342,7 @@ with side_col:
         marker=dict(size=3, color="#00d4ff", opacity=0.35),
     ))
     fig_const.update_layout(
-        title="Costellazione QPSK", template="plotly_dark",
+        title="QPSK constellation", template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         height=210, margin=dict(l=10, r=10, t=40, b=10),
         xaxis=dict(range=[-1.2, 1.2], gridcolor="rgba(255,255,255,0.06)", zeroline=True, zerolinecolor="rgba(255,255,255,0.15)"),
@@ -294,10 +358,10 @@ with side_col:
     fig_time.add_trace(go.Scatter(x=t_axis, y=result.iq.imag[:n_time], mode="lines",
                                    name="Q", line=dict(color="#ff5c7a", width=1.3)))
     fig_time.update_layout(
-        title="I/Q nel tempo (estratto)", template="plotly_dark",
+        title="I/Q over time (excerpt)", template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         height=210, margin=dict(l=10, r=10, t=40, b=10),
-        xaxis=dict(title="µs", gridcolor="rgba(255,255,255,0.06)"),
+        xaxis=dict(title="us", gridcolor="rgba(255,255,255,0.06)"),
         yaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
         legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0),
     )
@@ -306,7 +370,7 @@ with side_col:
 # --------------------------------------------------------------------------
 # Export
 # --------------------------------------------------------------------------
-st.markdown("### Esporta")
+st.markdown("### Export")
 exp_col1, exp_col2 = st.columns([1, 3])
 
 interleaved = np.empty(2 * len(result.iq), dtype=np.float32)
@@ -316,23 +380,23 @@ iq_bytes = interleaved.tobytes()
 meta_bytes = json.dumps(result.meta, indent=2).encode()
 
 with exp_col1:
-    st.download_button("Scarica IQ (.raw)", data=iq_bytes,
+    st.download_button("Download IQ (.raw)", data=iq_bytes,
                         file_name=output_filename, mime="application/octet-stream",
                         width='stretch')
-    st.download_button("Scarica metadata (.json)", data=meta_bytes,
+    st.download_button("Download metadata (.json)", data=meta_bytes,
                         file_name=output_filename.rsplit(".", 1)[0] + ".meta.json",
                         mime="application/json", width='stretch')
 with exp_col2:
     st.caption(
-        f"Formato: raw interleaved float32 (I0,Q0,I1,Q1,...) &middot; "
-        f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(result.iq):,} campioni @ "
-        f"{result.sample_rate/1e6:.3f} MS/s &middot; CADU: {params.n_cadu} x {result.cadu_bytes} byte"
+        f"Format: raw interleaved float32 (I0,Q0,I1,Q1,...) &middot; "
+        f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(result.iq):,} samples @ "
+        f"{result.sample_rate/1e6:.3f} MS/s &middot; CADU: {params.n_cadu} x {result.cadu_bytes} bytes"
     )
-    with st.expander("Vedi limitazioni note prima dell'uso su hardware reale"):
+    with st.expander("See known limitations before use on real hardware"):
         st.markdown("""
-- **RS Alpha/Beta**: uso i parametri GF(256) di default di `reedsolo`, non verificati contro la rappresentazione CCSDS attesa dal ricevitore.
-- **ASM** incluso nella codifica convoluzionale (e nello scrambling se attivo) seguendo l'ordine letterale della catena richiesta -- da validare.
-- **Formato IQ Converter** RF-Catcher da confermare con TestTree.
+- **RS Alpha/Beta**: uses `reedsolo`'s default GF(256) parameters, not verified against the CCSDS representation expected by the receiver.
+- **Scrambler bit-order convention**: the LFSR is a standard Fibonacci implementation, not yet cross-checked bit-for-bit against the CCSDS 131.0-B-2 reference sequence table.
+- **RF-Catcher IQ converter format** to be confirmed with TestTree.
 
-Dettagli completi in `README.md`.
+Full details in `README.md`.
         """)

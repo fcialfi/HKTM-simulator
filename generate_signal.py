@@ -2,9 +2,10 @@
 """Generate a CCSDS-chain test signal (baseline: QPSK) as raw IQ, for
 injection via RF-Catcher (TestTree) Capture & Playback.
 
-Chain: payload -> RS(255,223) interleaved x5 -> ASM prepend -> convolutional
-K=7 rate 1/2 -> NRZ-L -> optional CCSDS scrambler -> QPSK (Gray) -> RRC ->
-raw interleaved float32 IQ.
+Chain: payload -> RS(255,223) interleaved x5 -> optional CCSDS scrambler
+(excludes ASM) -> ASM prepend per CADU -> convolutional K=7 rate 1/2 (over
+the CADU stream, ASM included) -> NRZ-L -> QPSK (Gray) -> RRC -> raw
+interleaved float32 IQ.
 
 See README.md for architecture assumptions, limitations, and open TODOs
 before using the output against real ground equipment. For an interactive
@@ -92,12 +93,13 @@ def main():
           f"({'file: ' + params.payload_source if params.payload_source else 'pseudo-random, seed=' + str(params.seed)})")
     print(f"[2/8] RS({params.rs_n},{params.rs_k}) encode, interleave depth {params.interleave_depth}"
           f"{' (SKIPPED)' if not params.fec_rs else ''}")
-    print("[3/8] ASM (0x1ACFFC1D) inserito per CADU")
-    print(f"[4/8] Convolutional K=7 rate 1/2 (G1=171o, G2=133o, invert_g2={params.conv_invert_g2})"
+    print(f"[3/8] Scrambler CCSDS (seed 0xFF, excludes ASM){'' if params.scrambling else ' (SKIPPED)'}")
+    print("[4/8] ASM (0x1ACFFC1D) attached per CADU (forms the CADU)")
+    print(f"[5/8] Convolutional K=7 rate 1/2 over the CADU stream, ASM included "
+          f"(G1=171o, G2=133o, invert_g2={params.conv_invert_g2})"
           f"{' (SKIPPED)' if not params.fec_conv else ''}")
-    print("[5/8] NRZ-L mapping (bipolare diretto)")
-    print(f"[6/8] Scrambler CCSDS (seed 0xFF){'' if params.scrambling else ' (SKIPPED)'}")
-    print("[7/8] QPSK mapping (Gray, energia unitaria)")
+    print("[6/8] NRZ-L mapping (direct bipolar)")
+    print("[7/8] QPSK mapping (Gray, unit energy)")
     print(f"[8/8] Pulse shaping RRC (alpha={params.rrc_alpha}, span={params.rrc_span}, sps={params.sps})")
 
     result = run_chain(params)

@@ -8,7 +8,7 @@ import numpy as np
 
 from .reed_solomon import rs_encode_interleaved
 from .convolutional import conv_encode
-from .scrambler import apply_scrambler
+from .scrambler import scramble_bits
 from .mapping import bits_to_nrzl, qpsk_gray_map
 from .pulse_shaping import rrc_taps, pulse_shape
 from .utils import bytes_to_bits, generate_payload
@@ -61,22 +61,36 @@ def run_chain(p: ChainParams) -> ChainResult:
 
     payload = generate_payload(p.n_cadu, frame_bytes, p.payload_source, p.payload_bytes, p.seed)
 
-    cadus = bytearray()
+    # Build each CADU = ASM + RS-encoded codeblock, per CCSDS 131.0-B-3's
+    # "Overall Structure of Channel Coding": RS encode -> pseudo-randomize
+    # (the codeblock only, never the ASM) -> attach ASM (this forms the
+    # CADU) -> convolutionally encode the *stream of CADUs*. So the ASM IS
+    # convolutionally coded along with the rest: a convolutionally-coded
+    # stream is continuously Viterbi-decoded at the receiver (no framing
+    # needed to decode it), and frame sync is recovered by correlating for
+    # the literal ASM pattern in the *decoded* bitstream, not before
+    # decoding. The pseudo-randomizer is reinitialized for each CADU's
+    # codeblock (not carried over between CADUs).
+    asm_bits = bytes_to_bits(p.asm)
+    cadu_bit_chunks = []
     for i in range(p.n_cadu):
         frame = payload[i * frame_bytes:(i + 1) * frame_bytes]
         rs_block = (rs_encode_interleaved(frame, p.rs_k, p.rs_n, p.interleave_depth)
                     if p.fec_rs else frame)
-        cadus += p.asm
-        cadus += rs_block
+        rs_bits = bytes_to_bits(rs_block)
+        if p.scrambling:
+            rs_bits = scramble_bits(rs_bits)
+        cadu_bit_chunks.append(asm_bits)
+        cadu_bit_chunks.append(rs_bits)
     cadu_bytes = len(p.asm) + (p.rs_n * p.interleave_depth if p.fec_rs else frame_bytes)
 
-    bits = bytes_to_bits(bytes(cadus))
+    bits = np.concatenate(cadu_bit_chunks)
+    # Convolutional coding stays continuous across the whole burst (the
+    # register is never reset per CADU), matching a physical coder running
+    # continuously across the channel.
     coded_bits = conv_encode(bits, invert_g2=p.conv_invert_g2) if p.fec_conv else bits
 
     bipolar = bits_to_nrzl(coded_bits)
-    if p.scrambling:
-        bipolar = apply_scrambler(bipolar)
-
     symbols = qpsk_gray_map(bipolar)
 
     taps = rrc_taps(p.rrc_alpha, p.rrc_span, p.sps)
