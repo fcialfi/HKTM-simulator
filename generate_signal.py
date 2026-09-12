@@ -20,7 +20,7 @@ import json
 import os
 
 from ccsds_chain.pipeline import ChainParams, run_chain
-from ccsds_chain.utils import normalize_peak, resample_iq, pack_iq_interleaved
+from ccsds_chain.utils import normalize_peak, resample_iq, pack_iq_interleaved, resample_ratio
 
 # --------------------------------------------------------------------------
 # PARAMETRI CONFIGURABILI (rif. AWS-OSE-ICD-0063, baseline CCSDS 131.0-B-2)
@@ -133,8 +133,9 @@ def main():
     iq = normalize_peak(result.iq, args.peak)
     output_fs = result.sample_rate
     if args.target_fs is not None and args.target_fs != result.sample_rate:
+        up, down = resample_ratio(result.sample_rate, args.target_fs)
         print(f"[9/9] Resampling {result.sample_rate/1e6:.3f} MS/s -> {args.target_fs/1e6:.3f} MS/s "
-              f"(scipy.signal.resample_poly), format={args.dtype}, peak={args.peak}")
+              f"(ratio {up}/{down}, scipy.signal.resample_poly), format={args.dtype}, peak={args.peak}")
         iq = resample_iq(iq, result.sample_rate, args.target_fs)
         output_fs = args.target_fs
     else:

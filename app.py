@@ -18,8 +18,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ccsds_chain.pipeline import ChainParams, run_chain
-from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth
-from ccsds_chain.utils import normalize_peak, resample_iq, pack_iq_interleaved
+from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth, null_to_null_bandwidth
+from ccsds_chain.utils import normalize_peak, resample_iq, pack_iq_interleaved, resample_ratio
 
 BITS_PER_SYMBOL = {"QPSK": 2}
 
@@ -326,7 +326,7 @@ peak = np.max(psd)
 db = 10 * np.log10(psd / peak)
 
 bw_3db = contiguous_bandwidth(freqs, db, -3.0)
-bw_20db = contiguous_bandwidth(freqs, db, -20.0)
+bw_null = null_to_null_bandwidth(freqs, db)
 bw_theoretical = params.symbol_rate * (1 + params.rrc_alpha)
 
 # --------------------------------------------------------------------------
@@ -338,12 +338,14 @@ metrics = [
      "Width where the measured PSD stays within 3 dB of its peak. For an RRC-shaped "
      "signal this sits at +/-Rs/2 almost regardless of roll-off, so it tracks the "
      "symbol rate rather than the roll-off."),
-    ("-20dB Bandwidth", f"{bw_20db/1e6:.3f}", "MHz", "accent",
-     "Width where the measured PSD stays within 20 dB of its peak. Grows with the "
-     "roll-off alpha, approaching the theoretical occupied bandwidth at high alpha."),
+    ("Null-to-Null Bandwidth", f"{bw_null/1e6:.3f}", "MHz", "accent",
+     "Width of the main lobe between its first null on each side, found directly on "
+     "the measured PSD. For an RRC-shaped signal this null sits exactly at "
+     "+/-symbol_rate*(1+alpha)/2, so it tracks the 'Occupied BW (theoretical)' metric "
+     "to the right -- unlike the -3dB point, which barely moves with roll-off."),
     ("Occupied BW (theoretical)", f"{bw_theoretical/1e6:.3f}", "MHz", "accent",
      "Theoretical RRC spectral edge = symbol rate x (1 + alpha). Not a live "
-     "measurement -- compare it against the -20dB bandwidth above."),
+     "measurement -- compare it against the measured null-to-null bandwidth above."),
     ("Signal duration", f"{duration_ms:.1f}", "ms", "", "Length of the generated burst."),
     ("Sample rate", f"{result.sample_rate/1e6:.3f}", "MS/s", "", "Symbol rate x samples/symbol."),
     ("QPSK symbols", f"{len(result.symbols):,}".replace(",", " "), "", "", "Total number of QPSK symbols generated."),
@@ -374,8 +376,9 @@ with spec_col:
     fig.add_hline(y=-3, line=dict(color="#ffb454", width=1, dash="dash"),
                   annotation_text="-3 dB", annotation_position="top left",
                   annotation_font_color="#ffb454")
-    fig.add_hline(y=-20, line=dict(color="#ff5c7a", width=1, dash="dash"),
-                  annotation_text="-20 dB", annotation_position="top left",
+    fig.add_vline(x=-bw_null / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"))
+    fig.add_vline(x=bw_null / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"),
+                  annotation_text="null", annotation_position="top right",
                   annotation_font_color="#ff5c7a")
     fig.update_layout(
         title="Spectrum (PSD) -- real-time",
@@ -389,7 +392,7 @@ with spec_col:
     st.plotly_chart(fig, width='stretch')
     st.caption(
         "Note: the -3dB bandwidth (dashed orange) stays close to the symbol rate for "
-        "any roll-off -- it's the -20dB line (dashed red) and the 'Occupied BW "
+        "any roll-off -- it's the measured nulls (dashed red) and the 'Occupied BW "
         "(theoretical)' metric above that grow with alpha."
     )
 
@@ -440,6 +443,7 @@ st.caption(
 )
 
 symbols_per_cadu = len(result.symbols) / params.n_cadu
+native_fs = params.symbol_rate * params.sps
 exp_col1, exp_col2 = st.columns([1, 2])
 with exp_col1:
     export_n_cadu = st.number_input(
@@ -485,8 +489,15 @@ with fmt_col3:
     )
     target_fs = st.number_input("Target sample rate (Hz)", min_value=1.0, value=10_000_000.0, step=1e6,
                                  disabled=not resample_enabled, format="%.0f")
+    if resample_enabled:
+        up, down = resample_ratio(native_fs, target_fs)
+        st.caption(
+            f"Native: {native_fs/1e6:.3f} MS/s -> resample {up}/{down} "
+            f"({target_fs/native_fs:.3f}x) -> {target_fs/1e6:.3f} MS/s"
+        )
+    else:
+        st.caption(f"Native sample rate: {native_fs/1e6:.3f} MS/s (no resampling)")
 
-native_fs = params.symbol_rate * params.sps
 export_output_fs = target_fs if resample_enabled else native_fs
 export_bytes_per_sample = 4 if output_dtype == "float32" else 2
 export_native_samples = export_n_cadu * symbols_per_cadu * params.sps
