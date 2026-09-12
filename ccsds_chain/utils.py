@@ -51,14 +51,20 @@ def normalize_peak(iq: np.ndarray, peak: float = 0.9) -> np.ndarray:
     return iq * (peak / current_peak)
 
 
+def resample_ratio(source_fs: float, target_fs: float) -> tuple[int, int]:
+    """Smallest exact integer (up, down) ratio between two sample rates,
+    rounded to the nearest Hz first (real sample rates are always
+    effectively integers)."""
+    source_hz, target_hz = round(source_fs), round(target_fs)
+    step = gcd(source_hz, target_hz)
+    return target_hz // step, source_hz // step
+
+
 def resample_iq(iq: np.ndarray, source_fs: float, target_fs: float) -> np.ndarray:
     """Resample complex samples to an exact target sample rate, via
     polyphase resampling (`scipy.signal.resample_poly`) at the smallest
-    exact integer up/down ratio between the two (rounded to the nearest
-    Hz first, since real sample rates are always effectively integers)."""
-    source_hz, target_hz = round(source_fs), round(target_fs)
-    step = gcd(source_hz, target_hz)
-    up, down = target_hz // step, source_hz // step
+    exact integer up/down ratio between the two."""
+    up, down = resample_ratio(source_fs, target_fs)
     return resample_poly(iq, up, down)
 
 

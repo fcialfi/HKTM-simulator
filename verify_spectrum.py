@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from ccsds_chain.utils import unpack_iq_interleaved
-from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth
+from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth, null_to_null_bandwidth
 
 
 def main():
@@ -51,22 +51,23 @@ def main():
     db = 10 * np.log10(psd / peak)
 
     bw_3db = contiguous_bandwidth(freqs, db, -3.0)
-    bw_20db = contiguous_bandwidth(freqs, db, -20.0)
+    bw_null = null_to_null_bandwidth(freqs, db)
 
     symbol_rate = meta.get("symbol_rate")
     alpha = meta.get("rrc_alpha")
-    print(f"Banda occupata -3dB:  {bw_3db / 1e6:.4f} MHz")
-    print(f"Banda occupata -20dB: {bw_20db / 1e6:.4f} MHz")
+    print(f"Banda occupata -3dB:      {bw_3db / 1e6:.4f} MHz")
+    print(f"Banda null-nullo:         {bw_null / 1e6:.4f} MHz")
     if symbol_rate and alpha is not None:
         print(f"Attese (Rs={symbol_rate / 1e6:.3f} MHz, alpha={alpha}): "
               f"~{symbol_rate / 1e6:.2f}-{symbol_rate * 1.05 / 1e6:.2f} MHz (-3dB), "
-              f"~{symbol_rate * (1 + alpha) / 1e6:.2f} MHz (-20dB, teorico Rs*(1+alpha))")
+              f"~{symbol_rate * (1 + alpha) / 1e6:.2f} MHz (null-nullo, teorico Rs*(1+alpha))")
 
     if args.plot:
         plt.figure(figsize=(9, 5))
         plt.plot(freqs / 1e6, db)
         plt.axhline(-3, color="orange", linestyle="--", linewidth=0.8, label="-3 dB")
-        plt.axhline(-20, color="red", linestyle="--", linewidth=0.8, label="-20 dB")
+        plt.axvline(-bw_null / 2e6, color="red", linestyle="--", linewidth=0.8, label="null")
+        plt.axvline(bw_null / 2e6, color="red", linestyle="--", linewidth=0.8)
         plt.xlabel("Frequenza (MHz)")
         plt.ylabel("PSD relativa (dB)")
         plt.title(f"Spettro segnale generato ({os.path.basename(args.iq_file)})")

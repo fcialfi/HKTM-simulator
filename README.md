@@ -123,7 +123,7 @@ streamlit run app.py
 
 Apre un'interfaccia grafica (dark theme) con tutti i parametri della catena
 nella sidebar. **Ogni modifica a un parametro ricalcola la catena e
-aggiorna in tempo reale**: spettro (PSD con banda -3dB/-20dB evidenziata),
+aggiorna in tempo reale**: spettro (PSD con banda -3dB/null-nullo evidenziata),
 costellazione QPSK, estratto I/Q nel tempo, e le metriche (banda occupata,
 durata segnale, tempo di calcolo). Include un indicatore visivo degli
 stadi della pipeline attivi/disattivi ed export diretto del file IQ +
@@ -194,7 +194,9 @@ non e' specificato, il file viene salvato in `output/` con nome
 ## Verifica spettro
 
 `verify_spectrum.py` calcola la PSD (media di periodogrammi con finestra di
-Hanning) e misura la banda occupata a -3dB e -20dB attorno al centro banda.
-Con i parametri baseline (Rs=1.785 MS/s, alpha=0.35) ci si attende una banda
-occupata a -3dB vicina a Rs (~1.7-1.8 MHz) e a -20dB vicina a
-Rs*(1+alpha) (~2.3-2.4 MHz).
+Hanning) e misura la banda occupata a -3dB e la banda null-nullo (larghezza
+del lobo principale tra i primi due null misurati sullo spettro) attorno al
+centro banda. Con i parametri baseline (Rs=1.785 MS/s, alpha=0.35) ci si
+attende una banda occupata a -3dB vicina a Rs (~1.7-1.8 MHz) e una banda
+null-nullo vicina a Rs*(1+alpha) (~2.3-2.4 MHz, valore teorico esatto per un
+filtro RRC ideale).
