@@ -50,7 +50,7 @@ N_CADU = 100                   # numero di CADU da generare (durata segnale)
 PAYLOAD_SOURCE = None          # path a file con Transfer Frame reali, o None = pseudo-random
 PAYLOAD_SEED = 42              # seed per riproducibilita' del payload pseudo-random
 
-OUTPUT_DTYPE = "float32"       # "float32" ([-1,+1]) o "int16" (fondo scala)
+OUTPUT_DTYPE = "float32"       # "float32" ([-1,+1]) o "int16" (12 bit, formato RF-Catcher, [-2048,2047])
 OUTPUT_PEAK = 0.9              # ampiezza di picco normalizzata (margine anti-clipping)
 TARGET_FS = None               # Hz, o None per usare simbol_rate*sps nativo (nessun resample)
 OUTPUT_DIR = "output"
@@ -75,7 +75,8 @@ def build_cli():
     p.add_argument("--payload-source", type=str, default=PAYLOAD_SOURCE)
     p.add_argument("--seed", type=int, default=PAYLOAD_SEED)
     p.add_argument("--dtype", choices=["float32", "int16"], default=OUTPUT_DTYPE,
-                    help="IQ sample format for the output file")
+                    help="IQ sample format for the output file; int16 is the RF-Catcher "
+                         "format (little-endian, 12 significant bits, range [-2048, 2047])")
     p.add_argument("--peak", type=float, default=OUTPUT_PEAK,
                     help="normalized peak amplitude before dtype conversion (headroom against clipping)")
     p.add_argument("--target-fs", type=float, default=TARGET_FS,

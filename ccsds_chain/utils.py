@@ -62,10 +62,14 @@ def resample_iq(iq: np.ndarray, source_fs: float, target_fs: float) -> np.ndarra
     return resample_poly(iq, up, down)
 
 
+INT16_FULL_SCALE = 2047  # 12 significant bits (RF-Catcher/TestTree format), LSB-aligned in the 16-bit word
+
+
 def pack_iq_interleaved(iq: np.ndarray, dtype: str = "float32") -> bytes:
     """Pack complex samples as raw interleaved bytes, no header: I0, Q0,
-    I1, Q1, .... `dtype` is "float32" (range [-1, +1]) or "int16"
-    (full-scale signed 16-bit; samples should already be normalized to at
+    I1, Q1, .... `dtype` is "float32" (range [-1, +1]) or "int16" (RF-Catcher
+    format: little-endian, 12 significant bits in two's complement, LSB-
+    aligned, range [-2048, 2047]; samples should already be normalized to at
     most unit magnitude, e.g. via `normalize_peak`)."""
     n = len(iq)
     if dtype == "float32":
@@ -73,9 +77,9 @@ def pack_iq_interleaved(iq: np.ndarray, dtype: str = "float32") -> bytes:
         interleaved[0::2] = iq.real.astype(np.float32)
         interleaved[1::2] = iq.imag.astype(np.float32)
     elif dtype == "int16":
-        interleaved = np.empty(2 * n, dtype=np.int16)
-        interleaved[0::2] = np.clip(np.round(iq.real * 32767), -32768, 32767).astype(np.int16)
-        interleaved[1::2] = np.clip(np.round(iq.imag * 32767), -32768, 32767).astype(np.int16)
+        interleaved = np.empty(2 * n, dtype="<i2")
+        interleaved[0::2] = np.clip(np.round(iq.real * INT16_FULL_SCALE), -2048, 2047)
+        interleaved[1::2] = np.clip(np.round(iq.imag * INT16_FULL_SCALE), -2048, 2047)
     else:
         raise ValueError(f"unsupported IQ output dtype {dtype!r} (expected 'float32' or 'int16')")
     return interleaved.tobytes()
@@ -87,6 +91,6 @@ def unpack_iq_interleaved(data: bytes, dtype: str = "float32") -> np.ndarray:
         raw = np.frombuffer(data, dtype=np.float32)
         return raw[0::2] + 1j * raw[1::2]
     if dtype == "int16":
-        raw = np.frombuffer(data, dtype=np.int16)
-        return (raw[0::2] + 1j * raw[1::2]).astype(np.complex128) / 32767
+        raw = np.frombuffer(data, dtype="<i2")
+        return (raw[0::2] + 1j * raw[1::2]).astype(np.complex128) / INT16_FULL_SCALE
     raise ValueError(f"unsupported IQ input dtype {dtype!r} (expected 'float32' or 'int16')")

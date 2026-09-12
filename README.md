@@ -100,12 +100,14 @@ payload -> RS(255,223) interleave x5 -> [scrambler, esclude ASM]
     indipendente dalla frequenza nativa `symbol_rate x samples/symbol`
     usata internamente dalla catena.
 11. **Output**: file raw IQ interleaved (`I0,Q0,I1,Q1,...`, nessun header),
-    formato `float32` (default, range [-1,+1]) o `int16` (fondo scala,
-    selezionabile), con file `.meta.json` affiancato contenente i
-    parametri usati, la sample rate/formato effettivi del file esportato,
-    e una nota che il file e' in banda base (nessuna informazione di
-    frequenza portante: va impostata manualmente sullo strumento di
-    playback, es. il campo TX Freq di RF-Catcher).
+    formato `float32` (default, range [-1,+1]) o `int16` (selezionabile;
+    formato RF-Catcher/TestTree: little-endian, 12 bit significativi in
+    complemento a 2 allineati LSB, range [-2048, 2047]), con file
+    `.meta.json` affiancato contenente i parametri usati, la sample
+    rate/formato effettivi del file esportato, e una nota che il file e'
+    in banda base (nessuna informazione di frequenza portante: va
+    impostata manualmente sullo strumento di playback, es. il campo TX
+    Freq di RF-Catcher).
 
 ## Uso
 

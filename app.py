@@ -457,11 +457,12 @@ with exp_col2:
 fmt_col1, fmt_col2, fmt_col3 = st.columns(3)
 with fmt_col1:
     output_dtype_label = st.selectbox(
-        "Output format", ["float32 ([-1, +1])", "int16 (full-scale)"],
+        "Output format", ["float32 ([-1, +1])", "int16 (12-bit, RF-Catcher)"],
         help=(
             "Sample data type for the raw IQ file. float32 is compatible "
-            "with most modern SDR tooling; int16 is a more compact, "
-            "quantized format some instruments expect -- check what your "
+            "with most modern SDR tooling; int16 matches the RF-Catcher "
+            "(TestTree) format -- little-endian, 12 significant bits in "
+            "two's complement, range [-2048, 2047] -- check what your "
             "IQ recorder/replayer requires."
         ),
     )
