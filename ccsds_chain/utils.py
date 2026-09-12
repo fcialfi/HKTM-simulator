@@ -1,6 +1,9 @@
 """Bit/byte helpers and raw IQ file I/O shared by the CCSDS signal chain."""
 
+from math import gcd
+
 import numpy as np
+from scipy.signal import resample_poly
 
 
 def bytes_to_bits(data: bytes) -> np.ndarray:
@@ -39,40 +42,55 @@ def generate_payload(n_cadu: int, frame_bytes: int, source_path: str | None = No
     return data
 
 
-def iq_to_int16_interleaved(iq: np.ndarray, full_scale: int = 2047,
-                             headroom_db: float = 1.0) -> np.ndarray:
-    """Quantize complex samples to the RF-Catcher (TestTree) raw IQ format:
-    little-endian int16 per component with 12 significant bits in two's
-    complement (values in [-2048, 2047]), interleaved I0,Q0,I1,Q1,....
-
-    Samples are normalized to their peak magnitude and scaled to
-    `full_scale` with `headroom_db` dB of headroom before rounding, to use
-    the available 12-bit dynamic range without clipping. Returns a `<i2`
-    array ready to be written or serialized to bytes.
-    """
-    peak = np.max(np.abs(iq))
-    if peak == 0:
-        raise ValueError("all-zero IQ signal, cannot normalize for int16 export")
-    scale = (full_scale / peak) * 10 ** (-headroom_db / 20)
-
-    i = np.clip(np.round(iq.real * scale), -2048, 2047)
-    q = np.clip(np.round(iq.imag * scale), -2048, 2047)
-
-    interleaved = np.empty(2 * len(iq), dtype="<i2")
-    interleaved[0::2] = i
-    interleaved[1::2] = q
-    return interleaved
+def normalize_peak(iq: np.ndarray, peak: float = 0.9) -> np.ndarray:
+    """Scale complex samples so the largest |I| or |Q| excursion equals
+    `peak` (default 0.9, leaving headroom against clipping on playback)."""
+    current_peak = max(np.abs(iq.real).max(), np.abs(iq.imag).max())
+    if current_peak == 0:
+        return iq
+    return iq * (peak / current_peak)
 
 
-def write_iq_interleaved_int16(path: str, iq: np.ndarray, full_scale: int = 2047,
-                                headroom_db: float = 1.0) -> None:
-    """Write complex samples to `path` in the RF-Catcher raw IQ format
-    (no header, uncompressed, unencrypted) -- see `iq_to_int16_interleaved`."""
-    iq_to_int16_interleaved(iq, full_scale, headroom_db).tofile(path)
+def resample_iq(iq: np.ndarray, source_fs: float, target_fs: float) -> np.ndarray:
+    """Resample complex samples to an exact target sample rate, via
+    polyphase resampling (`scipy.signal.resample_poly`) at the smallest
+    exact integer up/down ratio between the two (rounded to the nearest
+    Hz first, since real sample rates are always effectively integers)."""
+    source_hz, target_hz = round(source_fs), round(target_fs)
+    step = gcd(source_hz, target_hz)
+    up, down = target_hz // step, source_hz // step
+    return resample_poly(iq, up, down)
 
 
-def read_iq_interleaved_int16(path: str) -> np.ndarray:
-    """Read a raw IQ file in the RF-Catcher format written by
-    `write_iq_interleaved_int16` back into a complex array."""
-    raw = np.fromfile(path, dtype="<i2")
-    return raw[0::2].astype(np.float64) + 1j * raw[1::2].astype(np.float64)
+INT16_FULL_SCALE = 2047  # 12 significant bits (RF-Catcher/TestTree format), LSB-aligned in the 16-bit word
+
+
+def pack_iq_interleaved(iq: np.ndarray, dtype: str = "float32") -> bytes:
+    """Pack complex samples as raw interleaved bytes, no header: I0, Q0,
+    I1, Q1, .... `dtype` is "float32" (range [-1, +1]) or "int16" (RF-Catcher
+    format: little-endian, 12 significant bits in two's complement, LSB-
+    aligned, range [-2048, 2047]; samples should already be normalized to at
+    most unit magnitude, e.g. via `normalize_peak`)."""
+    n = len(iq)
+    if dtype == "float32":
+        interleaved = np.empty(2 * n, dtype=np.float32)
+        interleaved[0::2] = iq.real.astype(np.float32)
+        interleaved[1::2] = iq.imag.astype(np.float32)
+    elif dtype == "int16":
+        interleaved = np.empty(2 * n, dtype="<i2")
+        interleaved[0::2] = np.clip(np.round(iq.real * INT16_FULL_SCALE), -2048, 2047)
+        interleaved[1::2] = np.clip(np.round(iq.imag * INT16_FULL_SCALE), -2048, 2047)
+    else:
+        raise ValueError(f"unsupported IQ output dtype {dtype!r} (expected 'float32' or 'int16')")
+    return interleaved.tobytes()
+
+
+def unpack_iq_interleaved(data: bytes, dtype: str = "float32") -> np.ndarray:
+    """Inverse of `pack_iq_interleaved`."""
+    if dtype == "float32":
+        raw = np.frombuffer(data, dtype=np.float32)
+        return raw[0::2] + 1j * raw[1::2]
+    if dtype == "int16":
+        raw = np.frombuffer(data, dtype="<i2")
+        return (raw[0::2] + 1j * raw[1::2]).astype(np.complex128) / INT16_FULL_SCALE
+    raise ValueError(f"unsupported IQ input dtype {dtype!r} (expected 'float32' or 'int16')")

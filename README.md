@@ -90,11 +90,24 @@ payload -> RS(255,223) interleave x5 -> [scrambler, esclude ASM]
 7. **QPSK Gray**: coppie di campioni bipolari -> I/Q, normalizzati a
    energia media unitaria per simbolo.
 8. **Pulse shaping RRC** (alpha configurabile, default 0.35).
-9. **Output**: file raw IQ nel formato RF-Catcher (TestTree) Capture &
-   Playback -- nessun header, non compresso, non cifrato, little-endian,
-   int16 a 12 bit significativi in complemento a 2 (range [-2048, 2047]),
-   interleaved `I0,Q0,I1,Q1,...` -- con file `.meta.json` affiancato
-   contenente i parametri usati.
+9. **Normalizzazione**: il segnale finale viene scalato a un picco di
+   ampiezza normalizzato configurabile (default 0.9 su scala [-1,+1]), per
+   lasciare margine e prevenire saturazione/clipping in fase di playback RF.
+10. **Resampling opzionale**: se richiesto (parametro `--target-fs` CLI o
+    "Resample to fixed rate" in GUI), il segnale viene ricampionato
+    (`scipy.signal.resample_poly`, rapporto intero esatto) a una frequenza
+    di campionamento specifica accettata dallo strumento di playback,
+    indipendente dalla frequenza nativa `symbol_rate x samples/symbol`
+    usata internamente dalla catena.
+11. **Output**: file raw IQ interleaved (`I0,Q0,I1,Q1,...`, nessun header),
+    formato `float32` (default, range [-1,+1]) o `int16` (selezionabile;
+    formato RF-Catcher/TestTree: little-endian, 12 bit significativi in
+    complemento a 2 allineati LSB, range [-2048, 2047]), con file
+    `.meta.json` affiancato contenente i parametri usati, la sample
+    rate/formato effettivi del file esportato, e una nota che il file e'
+    in banda base (nessuna informazione di frequenza portante: va
+    impostata manualmente sullo strumento di playback, es. il campo TX
+    Freq di RF-Catcher).
 
 ## Uso
 
@@ -123,15 +136,19 @@ disallineino.
 ### CLI
 
 ```bash
-python generate_signal.py                       # parametri baseline
+python generate_signal.py                       # parametri baseline, salva in output/qpsk_ccsds_*.iq
 python generate_signal.py --n-cadu 500 --randomizer long -o test.raw
 python generate_signal.py --rs-e 8 --interleave-depth 2 --conv-rate 3/4 -o test2.raw
+python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # per un Recorder/Replayer RF
 
-python verify_spectrum.py output_iq.raw --plot spectrum.png
+python verify_spectrum.py output/qpsk_ccsds_....iq --plot spectrum.png
 ```
 
 I parametri baseline sono costanti in testa a `generate_signal.py`; le
-opzioni piu' comuni sono anche esposte via CLI (`--help`).
+opzioni piu' comuni sono anche esposte via CLI (`--help`), incluse quelle
+di formato output (`--dtype`, `--peak`, `--target-fs`). Se `-o`/`--output`
+non e' specificato, il file viene salvato in `output/` con nome
+`qpsk_ccsds_<fs>Msps_<n_cadu>cadu_<timestamp>.iq`.
 
 ## Limitazioni
 
@@ -148,6 +165,12 @@ opzioni piu' comuni sono anche esposte via CLI (`--help`).
   in combinazioni particolari; la baseline (rate 1/2) non e' mai affetta.
 - **Convenzione NRZ-L**: bit 1 -> +1, bit 0 -> -1; da verificare contro la
   polarita' attesa dal ricevitore/tool.
+- **Formato file IQ**: raw interleaved (float32/int16, non-header) segue
+  la specifica di formato IQ fornita per il Recorder/Replayer target;
+  resta pero' da confermare con test end-to-end su hardware reale se lo
+  specifico tool "IQ Converter" di RF-Catcher (TestTree) richiede un
+  formato `.rfcatcher` diverso (con header/metadati propri) invece del
+  raw binario prodotto qui.
 - **Payload**: attualmente dati pseudo-casuali di test (o Transfer Frame
   grezzi da file); non viene costruito un vero header di Transfer Frame
   CCSDS (VCID, contatori, CRC, ecc.).
