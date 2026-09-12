@@ -39,14 +39,40 @@ def generate_payload(n_cadu: int, frame_bytes: int, source_path: str | None = No
     return data
 
 
-def write_iq_interleaved_float32(path: str, iq: np.ndarray) -> None:
-    """Write complex samples as raw interleaved float32: I0,Q0,I1,Q1,..."""
-    interleaved = np.empty(2 * len(iq), dtype=np.float32)
-    interleaved[0::2] = iq.real.astype(np.float32)
-    interleaved[1::2] = iq.imag.astype(np.float32)
-    interleaved.tofile(path)
+def iq_to_int16_interleaved(iq: np.ndarray, full_scale: int = 2047,
+                             headroom_db: float = 1.0) -> np.ndarray:
+    """Quantize complex samples to the RF-Catcher (TestTree) raw IQ format:
+    little-endian int16 per component with 12 significant bits in two's
+    complement (values in [-2048, 2047]), interleaved I0,Q0,I1,Q1,....
+
+    Samples are normalized to their peak magnitude and scaled to
+    `full_scale` with `headroom_db` dB of headroom before rounding, to use
+    the available 12-bit dynamic range without clipping. Returns a `<i2`
+    array ready to be written or serialized to bytes.
+    """
+    peak = np.max(np.abs(iq))
+    if peak == 0:
+        raise ValueError("all-zero IQ signal, cannot normalize for int16 export")
+    scale = (full_scale / peak) * 10 ** (-headroom_db / 20)
+
+    i = np.clip(np.round(iq.real * scale), -2048, 2047)
+    q = np.clip(np.round(iq.imag * scale), -2048, 2047)
+
+    interleaved = np.empty(2 * len(iq), dtype="<i2")
+    interleaved[0::2] = i
+    interleaved[1::2] = q
+    return interleaved
 
 
-def read_iq_interleaved_float32(path: str) -> np.ndarray:
-    raw = np.fromfile(path, dtype=np.float32)
-    return raw[0::2] + 1j * raw[1::2]
+def write_iq_interleaved_int16(path: str, iq: np.ndarray, full_scale: int = 2047,
+                                headroom_db: float = 1.0) -> None:
+    """Write complex samples to `path` in the RF-Catcher raw IQ format
+    (no header, uncompressed, unencrypted) -- see `iq_to_int16_interleaved`."""
+    iq_to_int16_interleaved(iq, full_scale, headroom_db).tofile(path)
+
+
+def read_iq_interleaved_int16(path: str) -> np.ndarray:
+    """Read a raw IQ file in the RF-Catcher format written by
+    `write_iq_interleaved_int16` back into a complex array."""
+    raw = np.fromfile(path, dtype="<i2")
+    return raw[0::2].astype(np.float64) + 1j * raw[1::2].astype(np.float64)

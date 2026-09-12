@@ -5,7 +5,9 @@ injection via RF-Catcher (TestTree) Capture & Playback.
 Chain: payload -> RS(255,223 or 255,239) interleaved -> optional CCSDS
 pseudo-randomizer (excludes ASM) -> ASM prepend per CADU -> convolutional
 K=7, rate 1/2 (or punctured to 2/3, 3/4, 5/6, 7/8) over the CADU stream
-(ASM included) -> NRZ-L -> QPSK (Gray) -> RRC -> raw interleaved float32 IQ.
+(ASM included) -> NRZ-L -> QPSK (Gray) -> RRC -> raw interleaved int16 IQ
+(RF-Catcher format: no header, little-endian, 12 significant bits in
+two's complement, range [-2048, 2047]).
 
 See README.md for architecture assumptions, limitations, and open TODOs
 before using the output against real ground equipment. For an interactive
@@ -16,7 +18,7 @@ import argparse
 import json
 
 from ccsds_chain.pipeline import ChainParams, run_chain
-from ccsds_chain.utils import write_iq_interleaved_float32
+from ccsds_chain.utils import write_iq_interleaved_int16
 
 # --------------------------------------------------------------------------
 # PARAMETRI CONFIGURABILI (rif. AWS-OSE-ICD-0063, baseline CCSDS 131.0-B-2)
@@ -114,7 +116,7 @@ def main():
 
     print(f"       -> {params.n_cadu} CADU x {result.cadu_bytes} byte")
 
-    write_iq_interleaved_float32(args.output, result.iq)
+    write_iq_interleaved_int16(args.output, result.iq)
 
     meta_path = args.output.rsplit(".", 1)[0] + ".meta.json"
     with open(meta_path, "w") as f:
@@ -124,7 +126,7 @@ def main():
     print(f"\nCompletato in {result.elapsed:.2f}s")
     print(f"  Simboli QPSK: {len(result.symbols)}  (durata segnale: {duration_s * 1000:.2f} ms)")
     print(f"  Campioni IQ:  {len(result.iq)}  @ {result.sample_rate / 1e6:.3f} MS/s")
-    print(f"  Output:       {args.output} ({len(result.iq) * 8 / 1e6:.2f} MB)")
+    print(f"  Output:       {args.output} ({len(result.iq) * 4 / 1e6:.2f} MB)")
     print(f"  Metadata:     {meta_path}")
 
 
