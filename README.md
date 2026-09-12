@@ -47,7 +47,7 @@ sul flusso di CADU:
 ```
 payload -> RS(255,223) interleave x5 -> [scrambler, esclude ASM]
         -> + ASM (per CADU, forma il CADU) -> conv. K=7 r=1/2 (sul flusso di CADU)
-        -> NRZ-L -> QPSK (Gray) -> RRC -> IQ float32
+        -> NRZ-L -> QPSK (Gray) -> RRC -> IQ int16 (RF-Catcher)
 ```
 
 1. **Payload**: dati pseudo-casuali riproducibili (seed) per CADU, oppure
