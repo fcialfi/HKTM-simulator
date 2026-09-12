@@ -20,12 +20,33 @@ def welch_psd(x: np.ndarray, nperseg: int = 4096) -> np.ndarray:
     return acc
 
 
-def contiguous_bandwidth(freqs: np.ndarray, db: np.ndarray, threshold_db: float) -> float:
-    """Width of the contiguous region around DC that stays above threshold_db."""
+def contiguous_bandwidth(freqs: np.ndarray, db: np.ndarray, threshold_db: float,
+                          min_consecutive_below: int = 3) -> float:
+    """Width of the contiguous region around DC that stays above threshold_db.
+
+    The Welch PSD estimate is noisy, so a single bin dipping below
+    threshold near the passband edge (statistical ripple, not the real
+    roll-off) would otherwise stop the scan early and report a bogus
+    near-zero bandwidth. A dip only ends the scan once it persists for
+    `min_consecutive_below` bins in a row; shorter dips are skipped over.
+    """
     center_idx = int(np.argmin(np.abs(freqs)))
-    left, right = center_idx, center_idx
-    while left > 0 and db[left - 1] >= threshold_db:
-        left -= 1
-    while right < len(db) - 1 and db[right + 1] >= threshold_db:
-        right += 1
+
+    def scan(step: int) -> int:
+        idx = center_idx
+        last_above = center_idx
+        below_run = 0
+        while 0 <= idx + step < len(db):
+            idx += step
+            if db[idx] >= threshold_db:
+                below_run = 0
+                last_above = idx
+            else:
+                below_run += 1
+                if below_run >= min_consecutive_below:
+                    break
+        return last_above
+
+    left = scan(-1)
+    right = scan(1)
     return freqs[right] - freqs[left]

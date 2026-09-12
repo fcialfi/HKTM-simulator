@@ -17,6 +17,7 @@ import streamlit as st
 
 from ccsds_chain.pipeline import ChainParams, run_chain
 from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth
+from ccsds_chain.utils import iq_to_int16_interleaved
 
 BITS_PER_SYMBOL = {"QPSK": 2}
 
@@ -427,10 +428,7 @@ with side_col:
 st.markdown("### Export")
 exp_col1, exp_col2 = st.columns([1, 3])
 
-interleaved = np.empty(2 * len(result.iq), dtype=np.float32)
-interleaved[0::2] = result.iq.real.astype(np.float32)
-interleaved[1::2] = result.iq.imag.astype(np.float32)
-iq_bytes = interleaved.tobytes()
+iq_bytes = iq_to_int16_interleaved(result.iq).tobytes()
 meta_bytes = json.dumps(result.meta, indent=2).encode()
 
 with exp_col1:
@@ -442,7 +440,7 @@ with exp_col1:
                         mime="application/json", width='stretch')
 with exp_col2:
     st.caption(
-        f"Format: raw interleaved float32 (I0,Q0,I1,Q1,...) &middot; "
+        f"Format: raw interleaved int16 LE, 12-bit [-2048,2047] (I0,Q0,I1,Q1,...) &middot; "
         f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(result.iq):,} samples @ "
         f"{result.sample_rate/1e6:.3f} MS/s &middot; CADU: {params.n_cadu} x {result.cadu_bytes} bytes"
     )
@@ -451,7 +449,6 @@ with exp_col2:
 - **Turbo coding and LDPC** (CCSDS 131.0-B-5 sections 6-8) are not implemented -- only Reed-Solomon, convolutional (with puncturing), and their concatenation.
 - **Transfer Frame length constraints** (section 11) are not enforced: some combinations of E / interleave depth / convolutional rate / CADU count can produce an odd number of coded bits, which fails QPSK pairing (shown as an error, not a crash). This never affects the rate-1/2 baseline.
 - **NRZ-L polarity**: bit 1 -> +1, bit 0 -> -1; not yet verified against the receiver/tool's expected polarity.
-- **RF-Catcher IQ converter format** to be confirmed with TestTree.
 
 Full details in `README.md`.
         """)
