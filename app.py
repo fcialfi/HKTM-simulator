@@ -16,7 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ccsds_chain.pipeline import ChainParams, run_chain
-from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth
+from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth, null_to_null_bandwidth
 
 st.set_page_config(
     page_title="HKTM CCSDS Signal Generator",
@@ -204,7 +204,7 @@ peak = np.max(psd)
 db = 10 * np.log10(psd / peak)
 
 bw_3db = contiguous_bandwidth(freqs, db, -3.0)
-bw_20db = contiguous_bandwidth(freqs, db, -20.0)
+bw_null_null = null_to_null_bandwidth(params.symbol_rate, params.rrc_alpha)
 
 # --------------------------------------------------------------------------
 # Metric cards
@@ -212,7 +212,7 @@ bw_20db = contiguous_bandwidth(freqs, db, -20.0)
 cols = st.columns(6)
 metrics = [
     ("Banda -3dB", f"{bw_3db/1e6:.3f}", "MHz", "accent"),
-    ("Banda -20dB", f"{bw_20db/1e6:.3f}", "MHz", "accent"),
+    ("Banda null-null", f"{bw_null_null/1e6:.3f}", "MHz", "accent"),
     ("Durata segnale", f"{duration_ms:.1f}", "ms", ""),
     ("Sample rate", f"{result.sample_rate/1e6:.3f}", "MS/s", ""),
     ("Simboli QPSK", f"{len(result.symbols):,}".replace(",", " "), "", ""),
@@ -242,8 +242,9 @@ with spec_col:
     fig.add_hline(y=-3, line=dict(color="#ffb454", width=1, dash="dash"),
                   annotation_text="-3 dB", annotation_position="top left",
                   annotation_font_color="#ffb454")
-    fig.add_hline(y=-20, line=dict(color="#ff5c7a", width=1, dash="dash"),
-                  annotation_text="-20 dB", annotation_position="top left",
+    fig.add_vline(x=-bw_null_null / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"))
+    fig.add_vline(x=bw_null_null / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"),
+                  annotation_text="null-null", annotation_position="top right",
                   annotation_font_color="#ff5c7a")
     fig.update_layout(
         title="Spettro (PSD) -- real-time",
@@ -315,6 +316,11 @@ with exp_col2:
         f"Formato: raw interleaved float32 (I0,Q0,I1,Q1,...) &middot; "
         f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(result.iq):,} campioni @ "
         f"{result.sample_rate/1e6:.3f} MS/s &middot; CADU: {params.n_cadu} x {result.cadu_bytes} byte"
+    )
+    st.info(
+        f"**Replay RF-Catcher** &mdash; Sample rate: `{result.sample_rate/1e6:.3f} MS/s` "
+        f"&middot; Banda (null-to-null): `{bw_null_null/1e6:.3f} MHz`",
+        icon="📡",
     )
     with st.expander("Vedi limitazioni note prima dell'uso su hardware reale"):
         st.markdown("""

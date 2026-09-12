@@ -20,6 +20,13 @@ def welch_psd(x: np.ndarray, nperseg: int = 4096) -> np.ndarray:
     return acc
 
 
+def null_to_null_bandwidth(symbol_rate: float, rrc_alpha: float) -> float:
+    """Theoretical null-to-null bandwidth of an RRC-shaped spectrum:
+    Rs * (1 + alpha), the exact edge of the (ideal, infinite-length) filter
+    support -- same value to type as RF-Catcher's replay bandwidth field."""
+    return symbol_rate * (1 + rrc_alpha)
+
+
 def contiguous_bandwidth(freqs: np.ndarray, db: np.ndarray, threshold_db: float) -> float:
     """Width of the contiguous region around DC that stays above threshold_db."""
     center_idx = int(np.argmin(np.abs(freqs)))
