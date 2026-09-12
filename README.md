@@ -41,7 +41,7 @@ ccsds_chain/
 
 ```
 payload -> RS(255,223) interleave x5 -> + ASM -> conv. K=7 r=1/2
-        -> NRZ-L -> [scrambler] -> QPSK (Gray) -> RRC -> IQ float32
+        -> NRZ-L -> [scrambler] -> QPSK (Gray) -> RRC -> IQ int16 (RF-Catcher)
 ```
 
 1. **Payload**: dati pseudo-casuali riproducibili (seed) per CADU, oppure
@@ -61,8 +61,11 @@ payload -> RS(255,223) interleave x5 -> + ASM -> conv. K=7 r=1/2
 7. **QPSK Gray**: coppie di campioni bipolari -> I/Q, normalizzati a
    energia media unitaria per simbolo.
 8. **Pulse shaping RRC** (alpha configurabile, default 0.35).
-9. **Output**: file raw IQ interleaved float32 (`I0,Q0,I1,Q1,...`), con
-   file `.meta.json` affiancato contenente i parametri usati.
+9. **Output**: file raw IQ nel formato RF-Catcher (TestTree) Capture &
+   Playback -- nessun header, non compresso, non cifrato, little-endian,
+   int16 a 12 bit significativi in complemento a 2 (range [-2048, 2047]),
+   interleaved `I0,Q0,I1,Q1,...` -- con file `.meta.json` affiancato
+   contenente i parametri usati.
 
 ## Uso
 
@@ -126,9 +129,6 @@ opzioni piu' comuni sono anche esposte via CLI (`--help`).
   stata verificata contro la sequenza di riferimento CCSDS 131.0-B-2.
 - **Convenzione NRZ-L**: bit 1 -> +1, bit 0 -> -1; da verificare contro la
   polarita' attesa dal ricevitore/tool.
-- **Formato file IQ**: raw interleaved float32 e' un'assunzione di partenza,
-  da verificare/adattare al formato richiesto dal tool "IQ Converter" della
-  RF-Catcher Suite per la conversione in formato `.rfcatcher`.
 - **Payload**: attualmente dati pseudo-casuali di test (o Transfer Frame
   grezzi da file); non viene costruito un vero header di Transfer Frame
   CCSDS (VCID, contatori, CRC, ecc.).

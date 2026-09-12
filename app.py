@@ -17,6 +17,7 @@ import streamlit as st
 
 from ccsds_chain.pipeline import ChainParams, run_chain
 from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth
+from ccsds_chain.utils import iq_to_int16_interleaved
 
 st.set_page_config(
     page_title="HKTM CCSDS Signal Generator",
@@ -297,10 +298,7 @@ with side_col:
 st.markdown("### Esporta")
 exp_col1, exp_col2 = st.columns([1, 3])
 
-interleaved = np.empty(2 * len(result.iq), dtype=np.float32)
-interleaved[0::2] = result.iq.real.astype(np.float32)
-interleaved[1::2] = result.iq.imag.astype(np.float32)
-iq_bytes = interleaved.tobytes()
+iq_bytes = iq_to_int16_interleaved(result.iq).tobytes()
 meta_bytes = json.dumps(result.meta, indent=2).encode()
 
 with exp_col1:
@@ -312,7 +310,7 @@ with exp_col1:
                         mime="application/json", width='stretch')
 with exp_col2:
     st.caption(
-        f"Formato: raw interleaved float32 (I0,Q0,I1,Q1,...) &middot; "
+        f"Formato: raw interleaved int16 LE, 12 bit [-2048,2047] (I0,Q0,I1,Q1,...) &middot; "
         f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(result.iq):,} campioni @ "
         f"{result.sample_rate/1e6:.3f} MS/s &middot; CADU: {params.n_cadu} x {result.cadu_bytes} byte"
     )

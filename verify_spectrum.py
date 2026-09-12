@@ -14,7 +14,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ccsds_chain.utils import read_iq_interleaved_float32
+from ccsds_chain.utils import read_iq_interleaved_int16
 from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth
 
 
@@ -36,7 +36,7 @@ def main():
     if fs is None:
         raise SystemExit("sample rate unknown: pass --sample-rate or generate the matching .meta.json")
 
-    iq = read_iq_interleaved_float32(args.iq_file)
+    iq = read_iq_interleaved_int16(args.iq_file)
     print(f"File: {args.iq_file}  ({len(iq)} campioni IQ @ {fs / 1e6:.3f} MS/s)")
 
     psd = welch_psd(iq, args.nperseg)

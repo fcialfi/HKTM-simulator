@@ -104,7 +104,7 @@ def run_chain(p: ChainParams) -> ChainResult:
         "n_cadu": p.n_cadu,
         "n_symbols": len(symbols),
         "n_iq_samples": len(iq),
-        "format": "raw interleaved float32 (I0,Q0,I1,Q1,...)",
+        "format": "raw interleaved int16 LE, 12-bit two's complement [-2048,2047] (I0,Q0,I1,Q1,...)",
     }
 
     return ChainResult(iq=iq, symbols=symbols, frame_bytes=frame_bytes, cadu_bytes=cadu_bytes,
