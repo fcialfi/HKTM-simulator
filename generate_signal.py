@@ -177,9 +177,8 @@ def main():
     if skipped:
         print(f"       -> synced to first CADU boundary, skipped {skipped} leading byte(s) of unframed data")
     if export_result["meta"].get("cadu_length_mismatch"):
-        print(f"       -> CADUs are {export_result['meta']['cadu_length_detected_bytes']} bytes long (measured "
-              f"from the ASM spacing in the file), not {export_result['meta']['cadu_length_configured_bytes']} "
-              "bytes as --rs-e/--interleave-depth would predict -- using the length measured from the data")
+        print(f"       -> CADU length measured from the data: {export_result['meta']['cadu_length_detected_bytes']} "
+              f"bytes (not {export_result['meta']['cadu_length_configured_bytes']}) -- using the measured length")
     print(f"       -> {params.n_cadu} CADU x {export_result['cadu_bytes']} byte")
 
     meta_path = output_path.rsplit(".", 1)[0] + ".meta.json"
