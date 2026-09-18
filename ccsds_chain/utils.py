@@ -84,8 +84,19 @@ def pack_iq_interleaved(iq: np.ndarray, dtype: str = "float32") -> bytes:
         interleaved[1::2] = iq.imag.astype(np.float32)
     elif dtype == "int16":
         interleaved = np.empty(2 * n, dtype="<i2")
-        interleaved[0::2] = np.clip(np.round(iq.real * INT16_FULL_SCALE), -2048, 2047)
-        interleaved[1::2] = np.clip(np.round(iq.imag * INT16_FULL_SCALE), -2048, 2047)
+        # In-place round/clip (instead of chaining np.round(np.clip(...))) keeps
+        # only one extra float64 buffer alive at a time -- for very large exports
+        # (hundreds of millions of samples) the naive chained version briefly
+        # allocates three such buffers per I/Q leg and can exhaust RAM.
+        scaled = iq.real * INT16_FULL_SCALE
+        np.round(scaled, out=scaled)
+        np.clip(scaled, -2048, 2047, out=scaled)
+        interleaved[0::2] = scaled
+        scaled = iq.imag * INT16_FULL_SCALE
+        np.round(scaled, out=scaled)
+        np.clip(scaled, -2048, 2047, out=scaled)
+        interleaved[1::2] = scaled
+        del scaled
     else:
         raise ValueError(f"unsupported IQ output dtype {dtype!r} (expected 'float32' or 'int16')")
     return interleaved.tobytes()

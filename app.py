@@ -590,39 +590,47 @@ with panel:
         def _update_progress(frac: float, message: str) -> None:
             progress_bar.progress(min(max(frac, 0.0), 1.0), text=message)
 
-        export_result = run_chain(export_params, progress_callback=_update_progress)
-        iq = normalize_peak(export_result.iq, output_peak)
-        output_fs = export_result.sample_rate
-        if resample_enabled and target_fs != export_result.sample_rate:
-            progress_bar.progress(1.0, text="Resampling...")
-            iq = resample_iq(iq, export_result.sample_rate, target_fs)
-            output_fs = target_fs
-        progress_bar.empty()
-        with st.spinner("Packing output file..."):
-            meta = dict(export_result.meta)
-            meta.update({
-                "format": "raw interleaved, no header (I0,Q0,I1,Q1,...)",
-                "output_dtype": output_dtype,
-                "output_peak": output_peak,
-                "output_sample_rate": output_fs,
-                "output_n_samples": len(iq),
-                "output_duration_s": len(iq) / output_fs,
-                "carrier_note": "file is baseband IQ (no carrier/frequency information); "
-                                 "set the intended RF center frequency manually on the playback instrument",
-            })
-            iq_bytes = pack_iq_interleaved(iq, output_dtype)
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            st.session_state["export_data"] = {
-                "iq_bytes": iq_bytes,
-                "meta_bytes": json.dumps(meta, indent=2).encode(),
-                "filename": f"qpsk_ccsds_{output_fs/1e6:.1f}Msps_{export_n_cadu}cadu_{timestamp}.iq",
-                "caption": (
-                    f"Format: raw interleaved {output_dtype} (I0,Q0,I1,Q1,...) &middot; "
-                    f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(iq):,} samples @ "
-                    f"{output_fs/1e6:.3f} MS/s &middot; CADU: {export_n_cadu} x {export_result.cadu_bytes} bytes"
-                ),
-            }
-            st.session_state["export_key"] = export_key
+        try:
+            export_result = run_chain(export_params, progress_callback=_update_progress)
+            iq = normalize_peak(export_result.iq, output_peak)
+            output_fs = export_result.sample_rate
+            if resample_enabled and target_fs != export_result.sample_rate:
+                progress_bar.progress(1.0, text="Resampling...")
+                iq = resample_iq(iq, export_result.sample_rate, target_fs)
+                output_fs = target_fs
+            progress_bar.empty()
+            with st.spinner("Packing output file..."):
+                meta = dict(export_result.meta)
+                meta.update({
+                    "format": "raw interleaved, no header (I0,Q0,I1,Q1,...)",
+                    "output_dtype": output_dtype,
+                    "output_peak": output_peak,
+                    "output_sample_rate": output_fs,
+                    "output_n_samples": len(iq),
+                    "output_duration_s": len(iq) / output_fs,
+                    "carrier_note": "file is baseband IQ (no carrier/frequency information); "
+                                     "set the intended RF center frequency manually on the playback instrument",
+                })
+                iq_bytes = pack_iq_interleaved(iq, output_dtype)
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                st.session_state["export_data"] = {
+                    "iq_bytes": iq_bytes,
+                    "meta_bytes": json.dumps(meta, indent=2).encode(),
+                    "filename": f"qpsk_ccsds_{output_fs/1e6:.1f}Msps_{export_n_cadu}cadu_{timestamp}.iq",
+                    "caption": (
+                        f"Format: raw interleaved {output_dtype} (I0,Q0,I1,Q1,...) &middot; "
+                        f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(iq):,} samples @ "
+                        f"{output_fs/1e6:.3f} MS/s &middot; CADU: {export_n_cadu} x {export_result.cadu_bytes} bytes"
+                    ),
+                }
+                st.session_state["export_key"] = export_key
+        except MemoryError:
+            progress_bar.empty()
+            st.error(
+                f"Out of memory generating ~{export_mb:,.0f} MB of samples ({export_n_cadu:,} CADUs). "
+                "Reduce the export size (fewer CADUs, or resample to a lower target rate) and try again."
+                .replace(",", " ")
+            )
 
     if "export_data" in st.session_state:
         data = st.session_state["export_data"]
