@@ -326,7 +326,7 @@ with panel:
     <div class="hktm-header">
       <div>
         <div class="hktm-title">HKTM <span>CCSDS</span> Signal Generator</div>
-        <div class="hktm-subtitle">AWS-OSE-ICD-0063 &middot; CCSDS 131.0-B-2 &middot; RF-Catcher (TestTree) test signal injection</div>
+        <div class="hktm-subtitle">CCSDS 131.0-B-2 &middot; RF-Catcher (TestTree) test signal injection</div>
       </div>
       <div class="hktm-badges">
         <div class="hktm-badge">QPSK</div>
@@ -640,14 +640,4 @@ with panel:
                 st.caption("Note: parameters changed since this file was generated -- click 'Generate export file' again to refresh.")
     else:
         st.caption("Click 'Generate export file' to produce a downloadable IQ file at the size set above.")
-
-    with st.expander("See known limitations before use on real hardware"):
-        st.markdown("""
-- **Turbo coding and LDPC** (CCSDS 131.0-B-5 sections 6-8) are not implemented -- only Reed-Solomon, convolutional (with puncturing), and their concatenation.
-- **Transfer Frame length constraints** (section 11) are not enforced: some combinations of E / interleave depth / convolutional rate / CADU count can produce an odd number of coded bits, which fails QPSK pairing (shown as an error, not a crash). This never affects the rate-1/2 baseline.
-- **NRZ-L polarity**: bit 1 -> +1, bit 0 -> -1; not yet verified against the receiver/tool's expected polarity.
-- **RF-Catcher's "IQ Converter" tool** may expect its own `.rfcatcher` container format rather than the raw binary produced here -- to be confirmed on real hardware.
-
-Full details in `README.md`.
-        """)
 
