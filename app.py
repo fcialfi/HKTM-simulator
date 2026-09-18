@@ -171,6 +171,10 @@ with st.sidebar:
             ),
         )
     rs_k = 255 - 2 * rs_e
+    # Mirrors ChainParams.frame_bytes / pipeline.py's frame_bytes computation:
+    # the data-zone size of one CADU at the current RS/interleave settings,
+    # needed below to tell how many complete CADUs a Transfer Frame file holds.
+    frame_bytes = rs_k * interleave_depth
 
     fec_conv = st.checkbox("Convolutional K=7", value=True)
     conv_rate = st.selectbox(
@@ -239,26 +243,55 @@ with st.sidebar:
     )
 
     st.markdown("### Payload & Duration")
-    n_cadu = st.slider(
-        "Preview CADU count", 5, 300, 40, 5,
-        help=(
-            "Number of CADUs used for the live spectrum/constellation preview "
-            "below. Kept small so every parameter change recomputes instantly. "
-            "The exported file's length is set independently, further down, "
-            "and is only (re)computed when you click 'Generate export file'."
-        ),
-    )
     payload_mode = st.radio("Payload source", ["Pseudo-random", "Transfer Frame file"], horizontal=True)
     payload_source_bytes = None
     seed = 42
+    file_cadu_count = None
     if payload_mode == "Pseudo-random":
         seed = st.number_input("Seed", value=42, step=1)
+        n_cadu = st.slider(
+            "Preview CADU count", 5, 300, 40, 5,
+            help=(
+                "Number of CADUs used for the live spectrum/constellation preview "
+                "below. Kept small so every parameter change recomputes instantly. "
+                "The exported file's length is set independently, further down, "
+                "and is only (re)computed when you click 'Generate export file'."
+            ),
+        )
     else:
         uploaded = st.file_uploader("Transfer Frame (binary)", type=None)
         if uploaded is not None:
             payload_source_bytes = uploaded.read()
+            file_cadu_count = len(payload_source_bytes) // frame_bytes
+            leftover_bytes = len(payload_source_bytes) - file_cadu_count * frame_bytes
+            if file_cadu_count < 1:
+                st.error(
+                    f"File too short: {len(payload_source_bytes)} bytes, but one CADU "
+                    f"needs {frame_bytes} bytes at the current RS/interleave settings "
+                    f"(RS(255,{rs_k}) x interleave {interleave_depth})."
+                )
+                st.stop()
+            st.caption(
+                f"File contains {file_cadu_count} complete CADU{'s' if file_cadu_count != 1 else ''} "
+                f"of {frame_bytes} bytes each"
+                + (f", {leftover_bytes} trailing bytes ignored (not a full CADU)" if leftover_bytes else "")
+                + " -- generation uses exactly these, no padding."
+            )
+            n_cadu = min(file_cadu_count, 300)
+            if file_cadu_count > n_cadu:
+                st.caption(
+                    f"Live preview uses the first {n_cadu} of {file_cadu_count} CADUs for "
+                    "responsiveness; the export below always uses all of them."
+                )
         else:
             st.caption("No file uploaded: falling back to pseudo-random.")
+            n_cadu = st.slider(
+                "Preview CADU count", 5, 300, 40, 5,
+                help=(
+                    "Number of CADUs used for the live spectrum/constellation preview "
+                    "below. Kept small so every parameter change recomputes instantly."
+                ),
+            )
 
 # --------------------------------------------------------------------------
 # Build params & run chain
@@ -470,15 +503,27 @@ with panel:
     native_fs = params.symbol_rate * params.sps
     exp_col1, exp_col2 = st.columns([1, 2])
     with exp_col1:
-        export_n_cadu = st.number_input(
-            "Export CADU count", min_value=1, value=int(n_cadu), step=100,
-            help=(
-                "Number of CADUs for the exported file -- independent of the "
-                "preview above, and only computed when you click 'Generate "
-                "export file' below, so a large value here doesn't slow down "
-                "live parameter tweaking."
-            ),
-        )
+        if payload_mode == "Transfer Frame file" and file_cadu_count is not None:
+            export_n_cadu = st.number_input(
+                "Export CADU count", min_value=1, max_value=int(file_cadu_count),
+                value=int(file_cadu_count), step=1,
+                help=(
+                    f"Capped at the {file_cadu_count} complete CADUs available in "
+                    "the uploaded Transfer Frame file: generation never pads with "
+                    "extra data, so this can't exceed what the file actually "
+                    "contains. Lower it to export only a leading subset."
+                ),
+            )
+        else:
+            export_n_cadu = st.number_input(
+                "Export CADU count", min_value=1, value=int(n_cadu), step=100,
+                help=(
+                    "Number of CADUs for the exported file -- independent of the "
+                    "preview above, and only computed when you click 'Generate "
+                    "export file' below, so a large value here doesn't slow down "
+                    "live parameter tweaking."
+                ),
+            )
     with exp_col2:
         export_duration_s = export_n_cadu * symbols_per_cadu / params.symbol_rate
 
