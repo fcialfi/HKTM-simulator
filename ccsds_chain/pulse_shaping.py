@@ -1,5 +1,7 @@
 """Root-Raised-Cosine pulse shaping."""
 
+from typing import Callable, Optional
+
 import numpy as np
 
 
@@ -26,10 +28,40 @@ def rrc_taps(alpha: float, span: int, sps: int) -> np.ndarray:
     return h / np.sqrt(np.sum(h ** 2))
 
 
-def pulse_shape(symbols: np.ndarray, sps: int, taps: np.ndarray) -> np.ndarray:
+_CHUNK_SYMBOLS = 200_000
+
+
+def pulse_shape(
+    symbols: np.ndarray,
+    sps: int,
+    taps: np.ndarray,
+    progress_callback: Optional[Callable[[float], None]] = None,
+) -> np.ndarray:
     """Upsample by zero-stuffing and convolve with the RRC filter.
     Note: this introduces a filter group delay of span/2 symbols at the
-    start and end of the output (transient ramp-up/down)."""
-    upsampled = np.zeros(len(symbols) * sps, dtype=complex)
-    upsampled[::sps] = symbols
-    return np.convolve(upsampled, taps, mode="full")
+    start and end of the output (transient ramp-up/down).
+
+    Processed in symbol chunks via overlap-add (each chunk's zero-stuffed,
+    convolved output tail overlaps the next chunk's head by len(taps)-1
+    samples) so `progress_callback(fraction)` -- if given -- can report
+    incremental progress on a long export; the result is bit-for-bit
+    identical to a single `np.convolve` over the whole signal, since
+    convolution is linear over concatenated input.
+    """
+    n = len(symbols)
+    tail = len(taps) - 1
+    out = np.zeros(n * sps + tail, dtype=complex)
+
+    pos = 0
+    for start in range(0, n, _CHUNK_SYMBOLS):
+        end = min(start + _CHUNK_SYMBOLS, n)
+        block = symbols[start:end]
+        upsampled = np.zeros(len(block) * sps, dtype=complex)
+        upsampled[::sps] = block
+        conv = np.convolve(upsampled, taps, mode="full")
+        out[pos:pos + len(conv)] += conv
+        pos += len(block) * sps
+        if progress_callback is not None:
+            progress_callback(end / n)
+
+    return out
