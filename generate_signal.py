@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Generate a CCSDS-chain test signal (baseline: QPSK) as raw IQ, for
-injection via RF-Catcher (TestTree) Capture & Playback or any other IQ
-recorder/replayer.
+"""Generate a CCSDS-chain test signal (baseline: QPSK, BPSK also available)
+as raw IQ, for injection via RF-Catcher (TestTree) Capture & Playback or any
+other IQ recorder/replayer.
 
 Chain: payload -> RS(255,223 or 255,239) interleaved -> optional CCSDS
 pseudo-randomizer (excludes ASM) -> ASM prepend per CADU -> convolutional
 K=7, rate 1/2 (or punctured to 2/3, 3/4, 5/6, 7/8) over the CADU stream
-(ASM included) -> NRZ-L -> QPSK (Gray) -> RRC -> peak-normalize -> optional
-resample -> raw interleaved IQ (float32 or int16), no header.
+(ASM included) -> NRZ-L -> QPSK (Gray) or BPSK -> RRC -> peak-normalize ->
+optional resample -> raw interleaved IQ (float32 or int16), no header.
 
 With --input-format cadu, the payload is instead treated as already-complete
 CADUs (ASM + RS-encoded, already pseudo-randomized if that's how they were
@@ -24,16 +24,16 @@ import datetime
 import json
 import os
 
+from ccsds_chain.mapping import BITS_PER_SYMBOL
 from ccsds_chain.pipeline import ChainParams, export_chain
 from ccsds_chain.utils import resample_ratio
 
 # --------------------------------------------------------------------------
 # CONFIGURABLE PARAMETERS (ref. AWS-OSE-ICD-0063, baseline CCSDS 131.0-B-2)
 # --------------------------------------------------------------------------
-MODULATION = "QPSK"            # selectable: only QPSK implemented (baseline)
+MODULATION = "QPSK"            # selectable: "QPSK" (baseline, 2 bits/symbol) or "BPSK" (1 bit/symbol)
 ENCODING = "NRZ-L"             # selectable: only NRZ-L implemented (baseline)
-BIT_RATE = 3_570_000           # bps, post-coding, header included (informative)
-SYMBOL_RATE = 1_785_000        # symbol/s (baseline QPSK: bit_rate/2)
+SYMBOL_RATE = 1_785_000        # symbol/s (bit_rate = symbol_rate * bits/symbol, derived below from MODULATION)
 SAMPLES_PER_SYM = 4            # "native" oversampling factor (internal, pre-resample)
 RRC_ALPHA = 0.35
 RRC_SPAN = 8                   # RRC taps = RRC_SPAN * SAMPLES_PER_SYM + 1
@@ -66,6 +66,10 @@ OUTPUT_DIR = "output"
 def build_cli():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--n-cadu", type=int, default=N_CADU)
+    p.add_argument("--modulation", choices=["QPSK", "BPSK"], default=MODULATION,
+                    help="QPSK (baseline, 2 bits/symbol) or BPSK (1 bit/symbol, half the bit "
+                         "rate at the same symbol rate -- the modulation the base rate-1/2 "
+                         "convolutional code's G2 inversion, CCSDS 3.3.1(5), is specified against)")
     p.add_argument("--alpha", type=float, default=RRC_ALPHA)
     p.add_argument("--sps", type=int, default=SAMPLES_PER_SYM)
     p.add_argument("--span", type=int, default=RRC_SPAN)
@@ -102,9 +106,9 @@ def main():
     args = build_cli()
 
     params = ChainParams(
-        modulation=MODULATION,
+        modulation=args.modulation,
         encoding=ENCODING,
-        bit_rate=BIT_RATE,
+        bit_rate=SYMBOL_RATE * BITS_PER_SYMBOL[args.modulation],
         symbol_rate=SYMBOL_RATE,
         sps=args.sps,
         rrc_alpha=args.alpha,
@@ -143,7 +147,8 @@ def main():
           f"(G1=171o, G2=133o, invert_g2={params.conv_invert_g2 and params.conv_rate == '1/2'})"
           f"{' (SKIPPED)' if not params.fec_conv else ''}")
     print("[6/9] NRZ-L mapping (direct bipolar)")
-    print("[7/9] QPSK mapping (Gray, unit energy)")
+    print(f"[7/9] {params.modulation} mapping"
+          + (" (Gray, unit energy)" if params.modulation == "QPSK" else " (unit energy, I only)"))
     print(f"[8/9] Pulse shaping RRC (alpha={params.rrc_alpha}, span={params.rrc_span}, sps={params.sps})")
 
     native_fs = params.symbol_rate * params.sps
@@ -191,7 +196,7 @@ def main():
     output_n_samples = export_result["meta"]["output_n_samples"]
     output_bytes = os.path.getsize(output_path)
     print(f"\nDone in {export_result['elapsed']:.2f}s")
-    print(f"  QPSK symbols:  {export_result['meta']['n_symbols']}")
+    print(f"  {params.modulation} symbols:  {export_result['meta']['n_symbols']}")
     print(f"  IQ samples:    {output_n_samples}  @ {output_fs / 1e6:.3f} MS/s (format {args.dtype})")
     print(f"  Signal duration: {export_result['meta']['output_duration_s'] * 1000:.2f} ms")
     print(f"  Output:        {output_path} ({output_bytes / 1e6:.2f} MB)")

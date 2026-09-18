@@ -18,7 +18,7 @@ ccsds_chain/
   reed_solomon.py         RS(255,223)/(255,239), CCSDS-native GF(256) and dual-basis
   convolutional.py        convolutional K=7, rate 1/2 punctured to 2/3-7/8
   scrambler.py             CCSDS pseudo-randomizer (131071-bit and 255-bit legacy)
-  mapping.py               NRZ-L + QPSK Gray
+  mapping.py               NRZ-L + QPSK Gray / BPSK
   pulse_shaping.py         RRC filter
   spectrum.py              PSD/occupied bandwidth (used by app.py and verify_spectrum.py)
   utils.py                 bit/byte helpers, IQ file I/O
@@ -28,8 +28,8 @@ ccsds_chain/
 
 | Parameter       | Baseline value          | Selectable |
 |-----------------|---------------------------|---------------|
-| Modulation     | QPSK                       | yes (only QPSK implemented) |
-| Bit rate        | 3,570 kbps (post-coding, header included) | yes (or symbol rate, kept in sync) |
+| Modulation     | QPSK                       | yes (QPSK or BPSK) |
+| Bit rate        | 3,570 kbps (post-coding, header included) | yes (or symbol rate, kept in sync; bit rate = symbol rate x bits/symbol, 2 for QPSK, 1 for BPSK) |
 | Symbol rate     | 1,785 kS/s                 | yes |
 | Encoding        | NRZ-L                      | yes (only NRZ-L implemented) |
 | RS FEC          | RS(255,223), interleave depth 5 | yes (on/off; E=8 or 16; I=1,2,3,4,5,8) |
@@ -46,7 +46,7 @@ over the CADU stream:
 ```
 payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
         -> + ASM (per CADU, forms the CADU) -> conv. K=7 r=1/2 (over the CADU stream)
-        -> NRZ-L -> QPSK (Gray) -> RRC -> IQ int16 (RF-Catcher)
+        -> NRZ-L -> QPSK (Gray) or BPSK -> RRC -> IQ int16 (RF-Catcher)
 ```
 
 1. **Payload**: reproducible pseudo-random data (seed) per CADU, or real data
@@ -115,8 +115,12 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
    before decoding.
 6. **NRZ-L**: direct bipolar mapping (bit 1 -> +1, bit 0 -> -1), no
    differential coding.
-7. **QPSK Gray**: pairs of bipolar samples -> I/Q, normalized to unit
-   average energy per symbol.
+7. **Symbol mapping** (`--modulation`, default QPSK): **QPSK Gray** pairs
+   consecutive bipolar samples into I/Q, normalized to unit average energy
+   per symbol; **BPSK** instead carries one bipolar sample per symbol on I
+   only (Q=0), at the same unit energy -- half the bit rate of QPSK at the
+   same symbol rate, but the modulation the base rate-1/2 convolutional
+   code's G2 inversion (3.3.1(5)) is specified against.
 8. **RRC pulse shaping** (configurable alpha, default 0.35).
 9. **Normalization**: the final signal is scaled to a configurable
    normalized peak amplitude (default 0.9 on a [-1,+1] scale), to leave
@@ -173,7 +177,7 @@ streamlit run app.py
 Opens a graphical interface (dark theme) with all chain parameters in the
 sidebar. **Every parameter change recomputes the chain and updates in real
 time**: spectrum (PSD with the -3dB/null-to-null bandwidth highlighted),
-QPSK constellation, I/Q excerpt over time, and metrics (occupied bandwidth,
+constellation, I/Q excerpt over time, and metrics (occupied bandwidth,
 signal duration, compute time). Includes a visual indicator of active/
 inactive pipeline stages and direct export of the IQ file + metadata from
 the browser ("Download" buttons).
@@ -188,6 +192,7 @@ apart.
 python generate_signal.py                       # baseline parameters, saves to output/qpsk_ccsds_*.iq
 python generate_signal.py --n-cadu 500 --randomizer long -o test.raw
 python generate_signal.py --rs-e 8 --interleave-depth 2 --conv-rate 3/4 -o test2.raw
+python generate_signal.py --modulation BPSK -o test3.raw
 python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # for an RF Recorder/Replayer
 
 python verify_spectrum.py output/qpsk_ccsds_....iq --plot spectrum.png
@@ -207,11 +212,13 @@ is not given, the file is saved to `output/` as
 - **Transfer Frame lengths** (section 11): the standard constrains the
   Transfer Frame lengths allowed for each coding scheme (to guarantee
   compatibility with the codeblock length, via "virtual fill" if needed).
-  This is not implemented: combinations of E / interleave depth /
+  This is not implemented: with QPSK, combinations of E / interleave depth /
   convolutional rate / CADU count that produce an odd number of coded bits
   fail (a visible error in the GUI/CLI, not a crash) at the QPSK pairing
   step. In practice this only happens with punctured convolutional rates in
-  specific combinations; the baseline (rate 1/2) is never affected.
+  specific combinations; the baseline (rate 1/2) is never affected. BPSK
+  (1 bit/symbol) is never affected by this at any rate, since it never
+  pairs bits into a symbol.
 - **NRZ-L convention**: bit 1 -> +1, bit 0 -> -1; to be checked against the
   polarity expected by the receiver/tool.
 - **IQ file format**: raw interleaved (float32/int16, no header) follows

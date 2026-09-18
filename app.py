@@ -18,6 +18,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
+from ccsds_chain.mapping import BITS_PER_SYMBOL
 from ccsds_chain.pipeline import ASM, ChainParams, export_chain, run_chain
 from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
@@ -34,8 +35,6 @@ EXPORT_DIR = "output"
 # would reintroduce the same peak-memory problem export_chain() avoids for
 # generation, just at download time instead.
 _DOWNLOAD_BUTTON_SIZE_LIMIT = 1 * 1024 ** 3
-
-BITS_PER_SYMBOL = {"QPSK": 2}
 
 st.set_page_config(
     page_title="HKTM CCSDS Signal Generator",
@@ -139,7 +138,17 @@ div[data-testid="stExpander"] { background: rgba(255,255,255,0.02); border: 1px 
 # --------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### Modulation & Encoding")
-    modulation = st.selectbox("Modulation", ["QPSK"], help="Baseline. Other modulations: roadmap.")
+    modulation = st.selectbox(
+        "Modulation", ["QPSK", "BPSK"],
+        help=(
+            "QPSK (baseline): 2 bits/symbol, 1 CCSDS-native RS/interleave-compatible "
+            "chain. BPSK: 1 bit/symbol -- half the bit rate at the same symbol rate/"
+            "occupied bandwidth (or double the occupied bandwidth for the same bit "
+            "rate), but the convolutional code's rate-1/2 G2 inversion (3.3.1(5)) is "
+            "specified against BPSK symbol synchronizers, so it's the modulation the "
+            "base rate-1/2 code was originally designed for."
+        ),
+    )
     encoding = st.selectbox("Line encoding", ["NRZ-L"], help="Baseline. Other encodings: roadmap.")
 
     bits_per_symbol = BITS_PER_SYMBOL[modulation]
@@ -266,7 +275,7 @@ with st.sidebar:
     randomizer = {"Long (131071-bit)": "long", "Short (255-bit, legacy)": "short", "None": "none"}[randomizer_label]
 
     st.markdown("### Pulse Shaping (RRC)")
-    st.caption("Shapes the QPSK symbols into a band-limited waveform (Root-Raised-Cosine filter) before D/A conversion.")
+    st.caption(f"Shapes the {modulation} symbols into a band-limited waveform (Root-Raised-Cosine filter) before D/A conversion.")
     rrc_alpha = st.slider(
         "Roll-off (alpha)", 0.05, 1.00, 0.35, 0.01,
         help=(
@@ -437,14 +446,14 @@ with panel:
         '<div class="panel-head"><span class="dot"></span><h2>Live Preview</h2></div>',
         unsafe_allow_html=True,
     )
-    st.markdown("""
+    st.markdown(f"""
     <div class="hktm-header">
       <div>
         <div class="hktm-title">HKTM <span>CCSDS</span> Signal Generator</div>
         <div class="hktm-subtitle">CCSDS 131.0-B-2 &middot; RF-Catcher (TestTree) test signal injection</div>
       </div>
       <div class="hktm-badges">
-        <div class="hktm-badge">QPSK</div>
+        <div class="hktm-badge">{modulation}</div>
         <div class="hktm-badge">1785 kS/s</div>
         <div class="hktm-badge">RS(255,223)</div>
         <div class="hktm-badge">CONV K=7</div>
@@ -464,7 +473,7 @@ with panel:
         chip("+ASM" + (" [in CADU]" if is_cadu_input else ""), not is_cadu_input),
         chip(f"CONV K=7 r={conv_rate}", fec_conv),
         chip("NRZ-L", True),
-        chip("QPSK GRAY", True),
+        chip(f"{modulation} GRAY" if modulation == "QPSK" else modulation, True),
         chip(f"RRC &alpha;={rrc_alpha:.2f}", True),
     ]) + '</div>'
     st.markdown(stages_html, unsafe_allow_html=True)
@@ -520,7 +529,7 @@ with panel:
     secondary_metrics = [
         ("Duration", f"{duration_ms:.1f} ms"),
         ("Sample rate", f"{result.sample_rate/1e6:.3f} MS/s"),
-        ("QPSK symbols", f"{len(result.symbols):,}".replace(",", " ")),
+        (f"{modulation} symbols", f"{len(result.symbols):,}".replace(",", " ")),
         ("Compute time", f"{result.elapsed*1000:.0f} ms"),
     ]
     secondary_html = '<div class="secondary-strip">' + "".join(
@@ -572,7 +581,7 @@ with panel:
             marker=dict(size=3, color="#00d4ff", opacity=0.35),
         ))
         fig_const.update_layout(
-            title="QPSK constellation", template="plotly_dark",
+            title=f"{modulation} constellation", template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             height=210, margin=dict(l=10, r=10, t=40, b=10),
             xaxis=dict(range=[-1.2, 1.2], gridcolor="rgba(255,255,255,0.06)", zeroline=True, zerolinecolor="rgba(255,255,255,0.15)"),
