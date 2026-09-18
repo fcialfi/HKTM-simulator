@@ -340,46 +340,43 @@ with st.sidebar:
                     )
                     st.stop()
                 usable_bytes = payload_source_bytes[sync_skipped_bytes:]
-                # Delimit CADUs directly by consecutive ASM positions in the
-                # data, not by a single length measured once and trusted for
-                # the rest of the file: a real downlink's CADUs aren't
-                # guaranteed to all be the same length (confirmed against a
-                # real captured pass, where 5 consecutive CADUs were 1348
-                # bytes and a 6th was 1344). Generation (export_chain/
-                # run_chain) does this same thing -- shown here too so the
-                # preview/count below match what generation will actually do.
-                cadu_length_varies = False
+                # The CADU is always exactly `unit_bytes` long -- the length
+                # the configured RS-E/interleave-depth predicts, never
+                # measured from ASM spacing: a capture instrument commonly
+                # wraps each CADU in its own record framing (e.g. RF-Catcher/
+                # TestTree's CRT format: a fixed header + CADU + a short
+                # postamble per record), and treating ASM-to-ASM distance as
+                # the CADU length would fold that framing into what's fed to
+                # convolutional coding as if it were coded CADU data.
+                # Generation (export_chain/run_chain) does this same thing --
+                # shown here too so the preview/count below match what
+                # generation will actually do.
                 positions = find_all_cadu_positions(usable_bytes, ASM)
-                if len(positions) >= 2:
-                    gaps = [positions[j + 1] - positions[j] for j in range(len(positions) - 1)]
-                    file_cadu_count = len(gaps)
-                    leftover_bytes = len(usable_bytes) - positions[-1]
-                    cadu_length_varies = len(set(gaps)) > 1
-                    if cadu_length_varies:
-                        st.warning(
-                            f"CADU length varies in this file: {min(gaps)}-{max(gaps)} bytes "
-                            f"(not a constant {unit_bytes}, as RS(255,{rs_k}) x interleave "
-                            f"{interleave_depth} would predict) -- delimiting each CADU by its "
-                            "own ASM instead of a fixed length."
-                        )
-                    elif gaps[0] != unit_bytes:
-                        st.warning(
-                            f"CADU length measured from the data: {gaps[0]} bytes (not {unit_bytes}, "
-                            f"as RS(255,{rs_k}) x interleave {interleave_depth} would predict) -- "
-                            "using the measured length."
-                        )
-                    file_unit_bytes = gaps[0]
-                else:
-                    file_cadu_count = 0
-                    leftover_bytes = len(usable_bytes)
+                wrapper_gaps = []
+                mismatch_at = None
+                for j in range(len(positions) - 1):
+                    gap = positions[j + 1] - positions[j]
+                    if gap < unit_bytes:
+                        mismatch_at = (positions[j], gap)
+                        break
+                    wrapper_gaps.append(gap - unit_bytes)
+                if mismatch_at is not None:
+                    pos, gap = mismatch_at
+                    st.error(
+                        f"CADU length from RS(255,{rs_k}) x interleave {interleave_depth} is "
+                        f"{unit_bytes} bytes, but the next ASM in the file is only {gap} bytes "
+                        f"after the one at offset {sync_skipped_bytes + pos}. Check that E/"
+                        "interleave depth match how these CADUs were actually built."
+                    )
+                    st.stop()
+                usable_positions = [pos for pos in positions if pos + unit_bytes <= len(usable_bytes)]
+                file_cadu_count = len(usable_positions)
+                leftover_bytes = len(usable_bytes) - (usable_positions[-1] + unit_bytes if usable_positions else 0)
             else:
                 file_cadu_count = len(usable_bytes) // file_unit_bytes
                 leftover_bytes = len(usable_bytes) - file_cadu_count * file_unit_bytes
             if file_cadu_count < 1:
                 st.error(
-                    f"File too short: {len(usable_bytes)} usable bytes after sync, but at least "
-                    "two ASMs are needed to delimit one complete CADU."
-                    if is_cadu_input else
                     f"File too short: {len(usable_bytes)} usable bytes after sync, but one "
                     f"CADU needs {file_unit_bytes} bytes."
                 )
@@ -388,9 +385,10 @@ with st.sidebar:
                 (f"Synced to the first CADU after skipping {sync_skipped_bytes} leading "
                  f"byte{'s' if sync_skipped_bytes != 1 else ''} of unframed data -- " if sync_skipped_bytes else "")
                 + f"File contains {file_cadu_count} complete CADU{'s' if file_cadu_count != 1 else ''} "
-                + (f"({min(gaps)}-{max(gaps)} bytes each)" if is_cadu_input and cadu_length_varies
-                   else f"of {file_unit_bytes} bytes each")
+                f"of {file_unit_bytes} bytes each"
                 + (f", {leftover_bytes} trailing bytes ignored (not a full CADU)" if leftover_bytes else "")
+                + (f" ({min(wrapper_gaps)}-{max(wrapper_gaps)} bytes of per-record "
+                   "framing stripped between CADUs)" if is_cadu_input and wrapper_gaps else "")
                 + " -- generation uses exactly these, no padding."
             )
             n_cadu = min(file_cadu_count, 300)
