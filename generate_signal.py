@@ -28,37 +28,37 @@ from ccsds_chain.pipeline import ChainParams, export_chain
 from ccsds_chain.utils import resample_ratio
 
 # --------------------------------------------------------------------------
-# PARAMETRI CONFIGURABILI (rif. AWS-OSE-ICD-0063, baseline CCSDS 131.0-B-2)
+# CONFIGURABLE PARAMETERS (ref. AWS-OSE-ICD-0063, baseline CCSDS 131.0-B-2)
 # --------------------------------------------------------------------------
-MODULATION = "QPSK"            # selezionabile: solo QPSK implementata (baseline)
-ENCODING = "NRZ-L"             # selezionabile: solo NRZ-L implementata (baseline)
-BIT_RATE = 3_570_000           # bps, post-codifica, header incluso (informativo)
+MODULATION = "QPSK"            # selectable: only QPSK implemented (baseline)
+ENCODING = "NRZ-L"             # selectable: only NRZ-L implemented (baseline)
+BIT_RATE = 3_570_000           # bps, post-coding, header included (informative)
 SYMBOL_RATE = 1_785_000        # symbol/s (baseline QPSK: bit_rate/2)
-SAMPLES_PER_SYM = 4            # oversampling factor "nativo" (interno, pre-resample)
+SAMPLES_PER_SYM = 4            # "native" oversampling factor (internal, pre-resample)
 RRC_ALPHA = 0.35
-RRC_SPAN = 8                   # taps RRC = RRC_SPAN * SAMPLES_PER_SYM + 1
+RRC_SPAN = 8                   # RRC taps = RRC_SPAN * SAMPLES_PER_SYM + 1
 
 RS_E = 16                       # error correction capability, in symbols: 8 or 16
 RS_N = 255
 INTERLEAVE_DEPTH = 5           # 1, 2, 3, 4, 5, or 8
 
-FEC_RS = True                  # selezionabile
-FEC_CONV = True                # selezionabile
-CONV_RATE = "1/2"              # 1/2, 2/3, 3/4, 5/6, 7/8 (puntura)
-CONV_INVERT_G2 = True          # bool, convenzione CCSDS standard (solo rate 1/2)
+FEC_RS = True                  # selectable
+FEC_CONV = True                # selectable
+CONV_RATE = "1/2"              # 1/2, 2/3, 3/4, 5/6, 7/8 (puncturing)
+CONV_INVERT_G2 = True          # bool, CCSDS standard convention (rate 1/2 only)
 
 RANDOMIZER = "none"            # "none", "short" (255-bit, legacy), "long" (131071-bit)
 
-ASM = bytes.fromhex("1ACFFC1D")  # 4 byte, non codificato
+ASM = bytes.fromhex("1ACFFC1D")  # 4 bytes, uncoded
 
-INPUT_FORMAT = "transfer_frame"  # "transfer_frame" (default) o "cadu" (dati gia' ASM+RS codificati)
-N_CADU = 100                   # numero di CADU da generare (durata segnale)
-PAYLOAD_SOURCE = None          # path a file con Transfer Frame reali (o CADU, se --input-format cadu), o None = pseudo-random
-PAYLOAD_SEED = 42              # seed per riproducibilita' del payload pseudo-random
+INPUT_FORMAT = "transfer_frame"  # "transfer_frame" (default) or "cadu" (already ASM+RS encoded)
+N_CADU = 100                   # number of CADUs to generate (signal duration)
+PAYLOAD_SOURCE = None          # path to a file with real Transfer Frames (or CADUs, if --input-format cadu), or None = pseudo-random
+PAYLOAD_SEED = 42              # seed for reproducibility of the pseudo-random payload
 
-OUTPUT_DTYPE = "float32"       # "float32" ([-1,+1]) o "int16" (12 bit, formato RF-Catcher, [-2048,2047])
-OUTPUT_PEAK = 0.9              # ampiezza di picco normalizzata (margine anti-clipping)
-TARGET_FS = None               # Hz, o None per usare simbol_rate*sps nativo (nessun resample)
+OUTPUT_DTYPE = "float32"       # "float32" ([-1,+1]) or "int16" (12-bit, RF-Catcher format, [-2048,2047])
+OUTPUT_PEAK = 0.9              # normalized peak amplitude (anti-clipping headroom)
+TARGET_FS = None               # Hz, or None to use native symbol_rate*sps (no resampling)
 OUTPUT_DIR = "output"
 # --------------------------------------------------------------------------
 
@@ -126,7 +126,7 @@ def main():
     is_cadu_input = params.input_format == "cadu"
     unit_bytes = len(params.asm) + params.rs_n * params.interleave_depth if is_cadu_input else params.rs_k * params.interleave_depth
 
-    print(f"[1/9] Generazione payload: {params.n_cadu} CADU x {unit_bytes} byte "
+    print(f"[1/9] Payload generation: {params.n_cadu} CADU x {unit_bytes} bytes "
           f"({'file: ' + params.payload_source if params.payload_source else 'pseudo-random, seed=' + str(params.seed)}), "
           f"input-format={params.input_format}")
     if is_cadu_input:
@@ -190,10 +190,10 @@ def main():
 
     output_n_samples = export_result["meta"]["output_n_samples"]
     output_bytes = os.path.getsize(output_path)
-    print(f"\nCompletato in {export_result['elapsed']:.2f}s")
-    print(f"  Simboli QPSK:  {export_result['meta']['n_symbols']}")
-    print(f"  Campioni IQ:   {output_n_samples}  @ {output_fs / 1e6:.3f} MS/s (formato {args.dtype})")
-    print(f"  Durata segnale: {export_result['meta']['output_duration_s'] * 1000:.2f} ms")
+    print(f"\nDone in {export_result['elapsed']:.2f}s")
+    print(f"  QPSK symbols:  {export_result['meta']['n_symbols']}")
+    print(f"  IQ samples:    {output_n_samples}  @ {output_fs / 1e6:.3f} MS/s (format {args.dtype})")
+    print(f"  Signal duration: {export_result['meta']['output_duration_s'] * 1000:.2f} ms")
     print(f"  Output:        {output_path} ({output_bytes / 1e6:.2f} MB)")
     print(f"  Metadata:      {meta_path}")
 
