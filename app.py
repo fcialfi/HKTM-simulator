@@ -20,7 +20,7 @@ import streamlit as st
 
 from ccsds_chain.pipeline import ASM, ChainParams, export_chain, run_chain
 from ccsds_chain.spectrum import welch_psd
-from ccsds_chain.utils import find_cadu_sync, resample_ratio
+from ccsds_chain.utils import detect_cadu_length, find_cadu_sync, resample_ratio
 
 # Exported IQ files are written here (same convention as generate_signal.py's
 # CLI default) rather than held fully in memory: export_chain() streams
@@ -324,6 +324,7 @@ with st.sidebar:
             payload_source_bytes = uploaded.read()
             sync_skipped_bytes = 0
             usable_bytes = payload_source_bytes
+            file_unit_bytes = unit_bytes
             if is_cadu_input:
                 # A real/captured CADU file isn't guaranteed to start exactly
                 # on a CADU boundary (leading idle line-fill, or an excerpt
@@ -339,21 +340,39 @@ with st.sidebar:
                     )
                     st.stop()
                 usable_bytes = payload_source_bytes[sync_skipped_bytes:]
-            file_cadu_count = len(usable_bytes) // unit_bytes
-            leftover_bytes = len(usable_bytes) - file_cadu_count * unit_bytes
+                # Measure the real CADU length from the data (distance to the
+                # next ASM) rather than trusting the RS-E/interleave-depth
+                # selected above: a real system's CADUs aren't guaranteed to
+                # use this tool's exact RS(255,*) interleaved framing, and
+                # generation (export_chain/run_chain) does this same
+                # detection itself -- shown here too so the preview/count
+                # below match what generation will actually do.
+                detected = detect_cadu_length(payload_source_bytes, ASM, sync_skipped_bytes)
+                if detected is not None and detected != unit_bytes:
+                    st.warning(
+                        f"Detected CADUs are {detected} bytes long (measured from the ASM "
+                        f"spacing in the file), not {unit_bytes} bytes as the current RS(255,"
+                        f"{rs_k}) x interleave {interleave_depth} settings would predict. "
+                        "Using the length measured from the data instead -- this is expected "
+                        "when the real CADUs weren't built with this exact RS/interleave "
+                        "framing (extra fields, CCSDS virtual fill, a different system "
+                        "entirely, ...); it does not mean the RS/interleave settings above "
+                        "are wrong for anything else."
+                    )
+                    file_unit_bytes = detected
+            file_cadu_count = len(usable_bytes) // file_unit_bytes
+            leftover_bytes = len(usable_bytes) - file_cadu_count * file_unit_bytes
             if file_cadu_count < 1:
                 st.error(
                     f"File too short: {len(usable_bytes)} usable bytes after sync, but one "
-                    f"CADU needs {unit_bytes} bytes at the current RS/interleave settings "
-                    f"(RS(255,{rs_k}) x interleave {interleave_depth}"
-                    f"{', + 4-byte ASM' if is_cadu_input else ''})."
+                    f"CADU needs {file_unit_bytes} bytes."
                 )
                 st.stop()
             st.caption(
                 (f"Synced to the first CADU after skipping {sync_skipped_bytes} leading "
                  f"byte{'s' if sync_skipped_bytes != 1 else ''} of unframed data -- " if sync_skipped_bytes else "")
                 + f"File contains {file_cadu_count} complete CADU{'s' if file_cadu_count != 1 else ''} "
-                f"of {unit_bytes} bytes each"
+                f"of {file_unit_bytes} bytes each"
                 + (f", {leftover_bytes} trailing bytes ignored (not a full CADU)" if leftover_bytes else "")
                 + " -- generation uses exactly these, no padding."
             )

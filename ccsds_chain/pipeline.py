@@ -14,7 +14,7 @@ from .convolutional import conv_encode, ConvEncoder
 from .scrambler import pn_sequence
 from .mapping import bits_to_nrzl, qpsk_gray_map
 from .pulse_shaping import rrc_taps, pulse_shape, RRCPulseShaper
-from .utils import bytes_to_bits, find_cadu_sync, generate_payload, pack_iq_interleaved, resample_iq
+from .utils import bytes_to_bits, detect_cadu_length, find_cadu_sync, generate_payload, pack_iq_interleaved, resample_iq
 
 ASM = bytes.fromhex("1ACFFC1D")
 
@@ -84,6 +84,13 @@ class _PayloadPrep:
     sync_skipped_bytes: int
     asm_bits: np.ndarray
     pn: Optional[np.ndarray]
+    # Set only for CADU input from a real source, when a second ASM was
+    # found in the data: the CADU length measured from the data itself,
+    # vs. what the configured RS-E/interleave-depth predicted. They differ
+    # whenever the real CADUs weren't built with this tool's exact
+    # RS(255,*) interleaved framing -- see detect_cadu_length().
+    detected_unit_bytes: Optional[int] = None
+    configured_unit_bytes: Optional[int] = None
 
 
 def _validate_chain_params(p: ChainParams) -> None:
@@ -138,7 +145,16 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
     is also not guaranteed to start exactly on a CADU boundary (leading
     idle line-fill, or an excerpt starting mid-stream), unlike a stream
     this tool built itself, so the raw source is searched for the first
-    real ASM before slicing into CADU-sized chunks.
+    real ASM before slicing into CADU-sized chunks. The CADU length used
+    for that slicing then comes from the data itself, not from the
+    configured RS-E/interleave-depth (see `detect_cadu_length()`): a real
+    system's CADUs aren't guaranteed to use this tool's exact RS(255,*)
+    interleaved framing (extra fields, a different interleave depth,
+    CCSDS "virtual fill" per section 11, a project-specific envelope,
+    ...), so trusting the configured settings for the *byte length* (as
+    opposed to for actually RS-decoding, which CADU input skips entirely)
+    would silently misalign every CADU after the first whenever they
+    don't match.
     """
     _validate_chain_params(p)
     frame_bytes, unit_bytes, rs_block_bytes, is_cadu_input = _unit_bytes(p)
@@ -147,6 +163,8 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
     has_real_source = p.payload_source is not None or p.payload_bytes is not None
     sync_skipped_bytes = 0
     n_synced_cadu = 0
+    detected_unit_bytes = None
+    configured_unit_bytes = None
     if is_cadu_input and has_real_source:
         # Read the raw source in full (not just the n_cadu*unit_bytes we
         # ultimately need) so there's enough of it to search past any
@@ -154,6 +172,20 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
         # whole CADUs after it.
         raw = p.payload_bytes if p.payload_bytes is not None else open(p.payload_source, "rb").read()
         sync_skipped_bytes = find_cadu_sync(raw, p.asm)
+
+        # Measure the real CADU length from the data (distance to the next
+        # ASM) instead of trusting the configured RS-E/interleave-depth: a
+        # real capture's CADUs aren't guaranteed to use this tool's exact
+        # RS(255,*) interleaved framing (extra fields, a different
+        # interleave depth, CCSDS "virtual fill" per section 11, a
+        # project-specific envelope, ...). Falls back to the configured
+        # length only when there's just one CADU to measure from.
+        configured_unit_bytes = unit_bytes
+        detected_unit_bytes = detect_cadu_length(raw, p.asm, sync_skipped_bytes)
+        if detected_unit_bytes is not None and detected_unit_bytes != unit_bytes:
+            unit_bytes = detected_unit_bytes
+            rs_block_bytes = unit_bytes - len(p.asm)
+
         synced = raw[sync_skipped_bytes:]
         n_synced_cadu = len(synced) // unit_bytes
         payload = generate_payload(p.n_cadu, unit_bytes, None, synced, p.seed)
@@ -166,7 +198,8 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
     return _PayloadPrep(payload=payload, unit_bytes=unit_bytes, frame_bytes=frame_bytes,
                          rs_block_bytes=rs_block_bytes, is_cadu_input=is_cadu_input,
                          has_real_source=has_real_source, n_synced_cadu=n_synced_cadu,
-                         sync_skipped_bytes=sync_skipped_bytes, asm_bits=asm_bits, pn=pn)
+                         sync_skipped_bytes=sync_skipped_bytes, asm_bits=asm_bits, pn=pn,
+                         detected_unit_bytes=detected_unit_bytes, configured_unit_bytes=configured_unit_bytes)
 
 
 def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
@@ -181,12 +214,22 @@ def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
         # actually gap-free after the first sync, rather than silently
         # feeding misaligned garbage into the convolutional stage.
         if prep.has_real_source and i < prep.n_synced_cadu and cadu[:len(p.asm)] != p.asm:
+            length_note = (
+                f"CADU length was measured from the data as {prep.unit_bytes} bytes "
+                "(distance between the first two ASMs found), not taken from the "
+                "configured RS/interleave settings, so this isn't a wrong E/interleave "
+                "-- the stream itself isn't a constant-length run of CADUs from this "
+                "point on (corruption, or CADUs of varying length)."
+                if prep.detected_unit_bytes is not None else
+                "CADU length came from the configured RS error correction E and "
+                "interleave depth (no second ASM was found in the source to measure "
+                "the real length from) -- check that they match how these CADUs were "
+                "actually built."
+            )
             raise ValueError(
                 f"Lost CADU sync at CADU {i} (byte offset "
                 f"{prep.sync_skipped_bytes + i * prep.unit_bytes} in the source): "
-                f"expected ASM {p.asm.hex()}, got {cadu[:len(p.asm)].hex()}. "
-                "Check that RS error correction E and interleave depth "
-                "match how these CADUs were actually built."
+                f"expected ASM {p.asm.hex()}, got {cadu[:len(p.asm)].hex()}. {length_note}"
             )
         return bytes_to_bits(cadu)
     frame = prep.payload[i * prep.frame_bytes:(i + 1) * prep.frame_bytes]
@@ -210,6 +253,13 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "rrc_span": p.rrc_span,
         "input_format": p.input_format,
         "cadu_sync_skipped_bytes": prep.sync_skipped_bytes if prep.is_cadu_input else None,
+        "cadu_length_detected_bytes": prep.detected_unit_bytes,
+        "cadu_length_configured_bytes": prep.configured_unit_bytes,
+        "cadu_length_mismatch": (
+            prep.detected_unit_bytes is not None
+            and prep.configured_unit_bytes is not None
+            and prep.detected_unit_bytes != prep.configured_unit_bytes
+        ),
         "fec_rs": p.fec_rs and not prep.is_cadu_input,
         "fec_conv": p.fec_conv,
         "conv_rate": p.conv_rate,

@@ -1,6 +1,7 @@
 """Bit/byte helpers and raw IQ file I/O shared by the CCSDS signal chain."""
 
 from math import gcd
+from typing import Optional
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -62,6 +63,33 @@ def find_cadu_sync(data: bytes, asm: bytes) -> int:
             "cannot locate a CADU boundary to synchronize to."
         )
     return offset
+
+
+def detect_cadu_length(data: bytes, asm: bytes, first_asm_offset: int) -> Optional[int]:
+    """Measure the real CADU length (ASM + coded data zone) directly from
+    the data, as the byte distance from `first_asm_offset` to the *next*
+    occurrence of `asm` -- rather than trusting a length computed from the
+    tool's configured RS/interleave settings.
+
+    This matters because a real/captured CADU stream is not guaranteed to
+    use this tool's exact RS(255,*) interleaved framing: extra fields, a
+    different interleave depth, CCSDS "virtual fill" (section 11), or a
+    project-specific envelope can all change the true CADU length in ways
+    the configured settings alone can't predict. The ASM's own design
+    (CCSDS 131.0-B-5 4.7-4.8) makes a false-positive match inside coded,
+    effectively-random data astronomically unlikely, so the distance
+    between two consecutive real matches is a reliable measurement of the
+    actual frame length -- independent of whatever E/interleave-depth is
+    selected in the UI.
+
+    Returns None if no second occurrence is found (e.g. the source holds
+    only one CADU), in which case the caller should fall back to the
+    length computed from its configured settings.
+    """
+    next_offset = data.find(asm, first_asm_offset + len(asm))
+    if next_offset < 0:
+        return None
+    return next_offset - first_asm_offset
 
 
 def normalize_peak(iq: np.ndarray, peak: float = 0.9) -> np.ndarray:

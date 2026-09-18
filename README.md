@@ -62,6 +62,25 @@ payload -> RS(255,223) interleave x5 -> [scrambler, esclude ASM]
      ASM davanti a dati che ne hanno gia' uno); viene comunque applicata,
      se abilitata, la sola codifica convoluzionale sul flusso di CADU, esattamente
      come farebbe un codificatore fisico a valle di un flusso di CADU gia' formato.
+
+     Un file CADU reale/catturato non e' detto che inizi esattamente su un
+     confine di CADU (idle non incorniciato davanti, o un estratto che parte a
+     meta' flusso): con una sorgente reale, il tool cerca il primo ASM vero nel
+     file prima di affettare (vedi `find_cadu_sync`), e valida che ogni CADU
+     successivo inizi ancora con l'ASM atteso, segnalando un errore chiaro se
+     la sincronizzazione si perde. La **lunghezza** di ogni CADU usata per
+     l'affettamento viene inoltre *misurata dai dati stessi* (distanza fra i
+     primi due ASM trovati nel file, vedi `detect_cadu_length`), non presa
+     dalle impostazioni RS/interleave configurate in UI: un sistema reale non
+     e' detto che usi esattamente la stessa codifica RS(255,*) interleaved di
+     questo tool (campi extra, "virtual fill" CCSDS sezione 11, un altro
+     sistema del tutto) -- fidarsi delle impostazioni configurate solo per la
+     *lunghezza in byte* (non per la decodifica RS vera e propria, che in
+     modalita' CADU viene comunque sempre saltata) disallineerebbe in modo
+     silenzioso ogni CADU dopo il primo. Se la lunghezza misurata differisce
+     da quella che le impostazioni RS-E/interleave predirebbero, viene
+     mostrato un avviso (in GUI) o una riga di log (nel CLI) che lo segnala
+     esplicitamente, e viene usata la lunghezza misurata.
 2. **Reed-Solomon**: RS(255,223) con E=16 (default) o RS(255,239) con E=8,
    interleaving a profondita' I=1,2,3,4,5,8 selezionabile (byte `i` va nel
    sotto-stream `i mod I`). Implementazione CCSDS-nativa (non una libreria
