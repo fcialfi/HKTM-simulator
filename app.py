@@ -350,14 +350,9 @@ with st.sidebar:
                 detected = detect_cadu_length(payload_source_bytes, ASM, sync_skipped_bytes)
                 if detected is not None and detected != unit_bytes:
                     st.warning(
-                        f"Detected CADUs are {detected} bytes long (measured from the ASM "
-                        f"spacing in the file), not {unit_bytes} bytes as the current RS(255,"
-                        f"{rs_k}) x interleave {interleave_depth} settings would predict. "
-                        "Using the length measured from the data instead -- this is expected "
-                        "when the real CADUs weren't built with this exact RS/interleave "
-                        "framing (extra fields, CCSDS virtual fill, a different system "
-                        "entirely, ...); it does not mean the RS/interleave settings above "
-                        "are wrong for anything else."
+                        f"CADU length measured from the data: {detected} bytes (not {unit_bytes}, "
+                        f"as RS(255,{rs_k}) x interleave {interleave_depth} would predict) -- "
+                        "using the measured length."
                     )
                     file_unit_bytes = detected
             file_cadu_count = len(usable_bytes) // file_unit_bytes
