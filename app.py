@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """HKTM CCSDS Signal Generator -- GUI (Streamlit).
 
-Interfaccia grafica per la generazione del segnale di test CCSDS (baseline
-QPSK) per iniezione via RF-Catcher (TestTree) Capture & Playback. Ogni
-modifica ai parametri ricalcola la catena e aggiorna spettro, costellazione
-e metriche in tempo reale.
+Graphical interface for generating the CCSDS test signal (baseline QPSK)
+for injection via RF-Catcher (TestTree) Capture & Playback. Every parameter
+change recomputes the chain and updates the spectrum, constellation and
+metrics in real time.
 
-Uso: streamlit run app.py
+Usage: streamlit run app.py
 """
 
 import dataclasses
