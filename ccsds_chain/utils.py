@@ -92,6 +92,33 @@ def detect_cadu_length(data: bytes, asm: bytes, first_asm_offset: int) -> Option
     return next_offset - first_asm_offset
 
 
+def find_all_cadu_positions(data: bytes, asm: bytes, start: int = 0) -> list[int]:
+    """Return the byte offset of every occurrence of `asm` in `data` from
+    `start` onward, in order.
+
+    Used to delimit CADUs directly by consecutive ASM positions rather than
+    by a single length measured once and then trusted for the rest of the
+    stream: a real downlink's CADUs are not guaranteed to all be the same
+    length (e.g. if they carry a variable number of packed Transfer
+    Frames/Space Packets rather than a fixed-size RS-interleaved
+    codeblock) -- confirmed against a real captured pass, where 5
+    consecutive CADUs were 1348 bytes and a 6th was 1344. Locating every
+    ASM up front and slicing CADU `i` as `data[positions[i]:positions[i+1]]`
+    handles that correctly regardless of whether lengths happen to be
+    constant or not, the same way a real, continuously-relocking frame
+    synchronizer would.
+    """
+    positions = []
+    pos = start
+    while True:
+        idx = data.find(asm, pos)
+        if idx < 0:
+            break
+        positions.append(idx)
+        pos = idx + 1
+    return positions
+
+
 def normalize_peak(iq: np.ndarray, peak: float = 0.9) -> np.ndarray:
     """Scale complex samples so the largest |I| or |Q| excursion equals
     `peak` (default 0.9, leaving headroom against clipping on playback)."""

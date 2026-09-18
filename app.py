@@ -20,7 +20,7 @@ import streamlit as st
 
 from ccsds_chain.pipeline import ASM, ChainParams, export_chain, run_chain
 from ccsds_chain.spectrum import welch_psd
-from ccsds_chain.utils import detect_cadu_length, find_cadu_sync, resample_ratio
+from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
 
 # Exported IQ files are written here (same convention as generate_signal.py's
 # CLI default) rather than held fully in memory: export_chain() streams
@@ -340,25 +340,46 @@ with st.sidebar:
                     )
                     st.stop()
                 usable_bytes = payload_source_bytes[sync_skipped_bytes:]
-                # Measure the real CADU length from the data (distance to the
-                # next ASM) rather than trusting the RS-E/interleave-depth
-                # selected above: a real system's CADUs aren't guaranteed to
-                # use this tool's exact RS(255,*) interleaved framing, and
-                # generation (export_chain/run_chain) does this same
-                # detection itself -- shown here too so the preview/count
-                # below match what generation will actually do.
-                detected = detect_cadu_length(payload_source_bytes, ASM, sync_skipped_bytes)
-                if detected is not None and detected != unit_bytes:
-                    st.warning(
-                        f"CADU length measured from the data: {detected} bytes (not {unit_bytes}, "
-                        f"as RS(255,{rs_k}) x interleave {interleave_depth} would predict) -- "
-                        "using the measured length."
-                    )
-                    file_unit_bytes = detected
-            file_cadu_count = len(usable_bytes) // file_unit_bytes
-            leftover_bytes = len(usable_bytes) - file_cadu_count * file_unit_bytes
+                # Delimit CADUs directly by consecutive ASM positions in the
+                # data, not by a single length measured once and trusted for
+                # the rest of the file: a real downlink's CADUs aren't
+                # guaranteed to all be the same length (confirmed against a
+                # real captured pass, where 5 consecutive CADUs were 1348
+                # bytes and a 6th was 1344). Generation (export_chain/
+                # run_chain) does this same thing -- shown here too so the
+                # preview/count below match what generation will actually do.
+                cadu_length_varies = False
+                positions = find_all_cadu_positions(usable_bytes, ASM)
+                if len(positions) >= 2:
+                    gaps = [positions[j + 1] - positions[j] for j in range(len(positions) - 1)]
+                    file_cadu_count = len(gaps)
+                    leftover_bytes = len(usable_bytes) - positions[-1]
+                    cadu_length_varies = len(set(gaps)) > 1
+                    if cadu_length_varies:
+                        st.warning(
+                            f"CADU length varies in this file: {min(gaps)}-{max(gaps)} bytes "
+                            f"(not a constant {unit_bytes}, as RS(255,{rs_k}) x interleave "
+                            f"{interleave_depth} would predict) -- delimiting each CADU by its "
+                            "own ASM instead of a fixed length."
+                        )
+                    elif gaps[0] != unit_bytes:
+                        st.warning(
+                            f"CADU length measured from the data: {gaps[0]} bytes (not {unit_bytes}, "
+                            f"as RS(255,{rs_k}) x interleave {interleave_depth} would predict) -- "
+                            "using the measured length."
+                        )
+                    file_unit_bytes = gaps[0]
+                else:
+                    file_cadu_count = 0
+                    leftover_bytes = len(usable_bytes)
+            else:
+                file_cadu_count = len(usable_bytes) // file_unit_bytes
+                leftover_bytes = len(usable_bytes) - file_cadu_count * file_unit_bytes
             if file_cadu_count < 1:
                 st.error(
+                    f"File too short: {len(usable_bytes)} usable bytes after sync, but at least "
+                    "two ASMs are needed to delimit one complete CADU."
+                    if is_cadu_input else
                     f"File too short: {len(usable_bytes)} usable bytes after sync, but one "
                     f"CADU needs {file_unit_bytes} bytes."
                 )
@@ -367,7 +388,8 @@ with st.sidebar:
                 (f"Synced to the first CADU after skipping {sync_skipped_bytes} leading "
                  f"byte{'s' if sync_skipped_bytes != 1 else ''} of unframed data -- " if sync_skipped_bytes else "")
                 + f"File contains {file_cadu_count} complete CADU{'s' if file_cadu_count != 1 else ''} "
-                f"of {file_unit_bytes} bytes each"
+                + (f"({min(gaps)}-{max(gaps)} bytes each)" if is_cadu_input and cadu_length_varies
+                   else f"of {file_unit_bytes} bytes each")
                 + (f", {leftover_bytes} trailing bytes ignored (not a full CADU)" if leftover_bytes else "")
                 + " -- generation uses exactly these, no padding."
             )
