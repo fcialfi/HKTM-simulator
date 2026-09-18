@@ -1,256 +1,259 @@
 # HKTM-simulator
 
-Generatore di segnale RF di test modulato secondo catena CCSDS (baseline
-QPSK), da iniettare via **RF-Catcher (TestTree) Capture & Playback
-Application**.
+Test RF signal generator, modulated per the CCSDS chain (baseline QPSK), to
+be injected via the **RF-Catcher (TestTree) Capture & Playback Application**.
 
-Riferimenti: AWS-OSE-ICD-0063 (Arctic Weather Satellite downlink),
+References: AWS-OSE-ICD-0063 (Arctic Weather Satellite downlink),
 CCSDS 131.0-B-5 (TM Synchronization and Channel Coding, Sept. 2023),
 ECSS-E-ST-50-01C.
 
-## Struttura del progetto
+## Project structure
 
 ```
-app.py                  GUI (Streamlit) con spettro/costellazione real-time
-generate_signal.py      CLI, genera output_iq.raw + metadata
-verify_spectrum.py      CLI, verifica banda occupata di un file IQ esistente
+app.py                  GUI (Streamlit) with real-time spectrum/constellation
+generate_signal.py      CLI, generates output_iq.raw + metadata
+verify_spectrum.py      CLI, checks the occupied bandwidth of an existing IQ file
 ccsds_chain/
-  pipeline.py            orchestrazione della catena (usata da app.py e generate_signal.py)
-  reed_solomon.py         RS(255,223)/(255,239), GF(256) e dual-basis CCSDS-nativi
-  convolutional.py        convoluzionale K=7, rate 1/2 punturato a 2/3-7/8
-  scrambler.py             pseudo-randomizer CCSDS (131071-bit e 255-bit legacy)
-  mapping.py               NRZ-L + QPSK Gray
-  pulse_shaping.py         filtro RRC
-  spectrum.py              PSD/banda occupata (usato da app.py e verify_spectrum.py)
-  utils.py                 bit/byte helpers, I/O file IQ
+  pipeline.py            chain orchestration (used by app.py and generate_signal.py)
+  reed_solomon.py         RS(255,223)/(255,239), CCSDS-native GF(256) and dual-basis
+  convolutional.py        convolutional K=7, rate 1/2 punctured to 2/3-7/8
+  scrambler.py             CCSDS pseudo-randomizer (131071-bit and 255-bit legacy)
+  mapping.py               NRZ-L + QPSK Gray / BPSK
+  pulse_shaping.py         RRC filter
+  spectrum.py              PSD/occupied bandwidth (used by app.py and verify_spectrum.py)
+  utils.py                 bit/byte helpers, IQ file I/O
 ```
 
-## Parametri baseline
+## Baseline parameters
 
-| Parametro       | Valore baseline          | Selezionabile |
+| Parameter       | Baseline value          | Selectable |
 |-----------------|---------------------------|---------------|
-| Modulazione     | QPSK                       | si (solo QPSK implementata) |
-| Bit rate        | 3 570 kbps (post-codifica, header incluso) | si (o symbol rate, sincronizzati) |
-| Symbol rate     | 1 785 kS/s                 | si |
-| Encoding        | NRZ-L                      | si (solo NRZ-L implementata) |
-| FEC RS          | RS(255,223), interleave depth 5 | si (on/off; E=8 o 16; I=1,2,3,4,5,8) |
-| FEC convoluzionale | rate 1/2, K=7, G1=171o, G2=133o | si (on/off; rate 1/2, 2/3, 3/4, 5/6, 7/8; invert G2 solo a rate 1/2) |
-| Pseudo-randomizer | nessuno                  | si (assente / 255-bit legacy / 131071-bit, default standard dal 2023) |
-| CADU            | 4 byte ASM (0x1ACFFC1D, non codificato) + 1275 byte RS-encoded = 1279 byte | dipende da I (CADU = 4 + 255*I byte) |
+| Modulation     | QPSK                       | yes (QPSK or BPSK) |
+| Bit rate        | 3,570 kbps (post-coding, header included) | yes (or symbol rate, kept in sync; bit rate = symbol rate x bits/symbol, 2 for QPSK, 1 for BPSK) |
+| Symbol rate     | 1,785 kS/s                 | yes |
+| Encoding        | NRZ-L                      | yes (only NRZ-L implemented) |
+| RS FEC          | RS(255,223), interleave depth 5 | yes (on/off; E=8 or 16; I=1,2,3,4,5,8) |
+| Convolutional FEC | rate 1/2, K=7, G1=171o, G2=133o | yes (on/off; rate 1/2, 2/3, 3/4, 5/6, 7/8; invert G2 only at rate 1/2) |
+| Pseudo-randomizer | none                  | yes (none / 255-bit legacy / 131071-bit, standard default since 2023) |
+| CADU            | 4-byte ASM (0x1ACFFC1D, uncoded) + 1275-byte RS-encoded = 1279 bytes | depends on I (CADU = 4 + 255*I bytes) |
 
-## Catena implementata
+## Implemented chain
 
-Segue la struttura ufficiale CCSDS 131.0-B-3 ("Overall Structure of Channel
-Coding"): RS encode -> pseudo-random -> attach ASM (= CADU) -> convoluzionale
-sul flusso di CADU:
+Follows the official CCSDS 131.0-B-3 structure ("Overall Structure of Channel
+Coding"): RS encode -> pseudo-random -> attach ASM (= CADU) -> convolutional
+over the CADU stream:
 
 ```
-payload -> RS(255,223) interleave x5 -> [scrambler, esclude ASM]
-        -> + ASM (per CADU, forma il CADU) -> conv. K=7 r=1/2 (sul flusso di CADU)
-        -> NRZ-L -> QPSK (Gray) -> RRC -> IQ int16 (RF-Catcher)
+payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
+        -> + ASM (per CADU, forms the CADU) -> conv. K=7 r=1/2 (over the CADU stream)
+        -> NRZ-L -> QPSK (Gray) or BPSK -> RRC -> IQ int16 (RF-Catcher)
 ```
 
-1. **Payload**: dati pseudo-casuali riproducibili (seed) per CADU, oppure dati
-   reali da file (`--payload-source`). Il formato di questi dati e' selezionabile
-   con `--input-format` (o, in GUI, "Payload contains"):
-   - `transfer_frame` (default): Transfer Frame grezze, non codificate. RS,
-     pseudo-randomizer e ASM vengono tutti applicati qui per costruire i CADU.
-   - `cadu`: CADU gia' completi (ASM + blocco RS-codificato, gia'
-     pseudo-randomizzato se e' cosi' che sono stati costruiti) -- ad es. CADU
-     catturati o generati in precedenza. In questo caso RS, randomizer e ASM
-     **non** vengono riapplicati (per evitare una doppia codifica e un secondo
-     ASM davanti a dati che ne hanno gia' uno); viene comunque applicata,
-     se abilitata, la sola codifica convoluzionale sul flusso di CADU, esattamente
-     come farebbe un codificatore fisico a valle di un flusso di CADU gia' formato.
+1. **Payload**: reproducible pseudo-random data (seed) per CADU, or real data
+   from a file (`--payload-source`). The format of this data is selectable
+   via `--input-format` (or, in the GUI, "Payload contains"):
+   - `transfer_frame` (default): raw, uncoded Transfer Frames. RS, the
+     pseudo-randomizer and the ASM are all applied here to build the CADUs.
+   - `cadu`: already-complete CADUs (ASM + RS-encoded block, already
+     pseudo-randomized if that's how they were built) -- e.g. captured or
+     previously generated CADUs. In this case RS, the randomizer and the ASM
+     are **not** re-applied (to avoid double-encoding and a second ASM in
+     front of data that already has one); only the convolutional stage (if
+     enabled) is still applied over the CADU stream, exactly as a physical
+     coder downstream of an already-formed CADU stream would.
 
-     Un file CADU reale/catturato non e' detto che inizi esattamente su un
-     confine di CADU (idle non incorniciato davanti, o un estratto che parte a
-     meta' flusso): con una sorgente reale, il tool cerca il primo ASM vero nel
-     file prima di affettare (vedi `find_cadu_sync`), e valida che ogni CADU
-     successivo inizi ancora con l'ASM atteso, segnalando un errore chiaro se
-     la sincronizzazione si perde. La **lunghezza** di ogni CADU usata per
-     l'affettamento viene inoltre *misurata dai dati stessi* (distanza fra i
-     primi due ASM trovati nel file, vedi `detect_cadu_length`), non presa
-     dalle impostazioni RS/interleave configurate in UI: un sistema reale non
-     e' detto che usi esattamente la stessa codifica RS(255,*) interleaved di
-     questo tool (campi extra, "virtual fill" CCSDS sezione 11, un altro
-     sistema del tutto) -- fidarsi delle impostazioni configurate solo per la
-     *lunghezza in byte* (non per la decodifica RS vera e propria, che in
-     modalita' CADU viene comunque sempre saltata) disallineerebbe in modo
-     silenzioso ogni CADU dopo il primo. Se la lunghezza misurata differisce
-     da quella che le impostazioni RS-E/interleave predirebbero, viene
-     mostrato un avviso (in GUI) o una riga di log (nel CLI) che lo segnala
-     esplicitamente, e viene usata la lunghezza misurata.
-2. **Reed-Solomon**: RS(255,223) con E=16 (default) o RS(255,239) con E=8,
-   interleaving a profondita' I=1,2,3,4,5,8 selezionabile (byte `i` va nel
-   sotto-stream `i mod I`). Implementazione CCSDS-nativa (non una libreria
-   RS generica): campo di Galois GF(256) con polinomio F(x)=x^8+x^7+x^2+x+1
-   (0x187, non lo 0x11D "generico"), polinomio generatore g(x) con radici
-   alpha^(11j) preso direttamente dai coefficienti espansi in Annex G dello
-   standard, e rappresentazione **dual-basis (Berlekamp)** obbligatoria
-   (4.3.9) applicata alla sola parita' calcolata (i byte del Transfer Frame
-   restano invariati, essendo la parte "non codificata" del CADU -- vedi
-   Annex F, "Transformational Equivalence"). GF(256), coefficienti g(x) e
-   trasformazione dual-basis sono stati verificati contro le tabelle di
-   riferimento e gli esempi numerici forniti dallo standard stesso (Table
-   F-1, Annex G, Examples 1-2 di Annex F), oltre che per divisibilita'
-   algebrica del codeword risultante per tutte le 2E radici richieste.
-3. **Pseudo-randomizer CCSDS** (opzionale, sezione 10): sequenza lunga a
-   131071 bit (default dello standard dal 2023, polinomio x^17+x^14+1) o
-   corta a 255 bit (legacy, polinomio 1+x^3+x^5+x^7+x^8) via XOR bit-a-bit
-   al solo blocco RS-codificato di ogni CADU (mai all'ASM), reinizializzato
-   a ogni CADU. Entrambe le sequenze sono state validate bit-per-bit contro
-   le sequenze di riferimento (primi 40 bit) fornite dallo standard.
-4. **ASM** (4 byte, `0x1ACFFC1D`) prepeso al blocco (randomizzato o meno) di
-   ogni CADU -- questo e' letteralmente cio' che CCSDS chiama CADU.
-5. **Convoluzionale** K=7, polinomi CCSDS 171/133 ottale, rate 1/2 (base) o
-   punturato a 2/3, 3/4, 5/6, 7/8 (Table 3-1); l'inversione di G2 si applica
-   solo a rate 1/2 (a rate punturati non c'e' inversione, per 3.4.1). Il
-   codificatore lavora in modo continuo sull'intero flusso di CADU
-   concatenati (ASM incluso), con stato del registro azzerato una sola
-   volta all'inizio dell'intero segnale (non per-CADU). L'ASM viene quindi
-   convoluzionalmente codificato insieme al resto: per un flusso
-   convoluzionale la sincronizzazione di frame lato ricevitore si ottiene
-   correlando l'ASM nel bitstream **gia' decodificato** (Viterbi decodifica
-   in continuo, senza bisogno di sync preventiva), non prima della
-   decodifica.
-6. **NRZ-L**: mapping bipolare diretto (bit 1 -> +1, bit 0 -> -1), nessuna
-   codifica differenziale.
-7. **QPSK Gray**: coppie di campioni bipolari -> I/Q, normalizzati a
-   energia media unitaria per simbolo.
-8. **Pulse shaping RRC** (alpha configurabile, default 0.35).
-9. **Normalizzazione**: il segnale finale viene scalato a un picco di
-   ampiezza normalizzato configurabile (default 0.9 su scala [-1,+1]), per
-   lasciare margine e prevenire saturazione/clipping in fase di playback RF.
-10. **Resampling opzionale**: se richiesto (parametro `--target-fs` CLI o
-    "Resample to fixed rate" in GUI), il segnale viene ricampionato
-    (`scipy.signal.resample_poly`, rapporto intero esatto) a una frequenza
-    di campionamento specifica accettata dallo strumento di playback,
-    indipendente dalla frequenza nativa `symbol_rate x samples/symbol`
-    usata internamente dalla catena.
-11. **Output**: file raw IQ interleaved (`I0,Q0,I1,Q1,...`, nessun header),
-    formato `float32` (default, range [-1,+1]) o `int16` (selezionabile;
-    formato RF-Catcher/TestTree: little-endian, 12 bit significativi in
-    complemento a 2 allineati LSB, range [-2048, 2047]), con file
-    `.meta.json` affiancato contenente i parametri usati, la sample
-    rate/formato effettivi del file esportato, e una nota che il file e'
-    in banda base (nessuna informazione di frequenza portante: va
-    impostata manualmente sullo strumento di playback, es. il campo TX
-    Freq di RF-Catcher).
+     A real/captured CADU file is not guaranteed to start exactly on a CADU
+     boundary (unframed idle line-fill in front, or an excerpt starting
+     mid-stream): with a real source, the tool searches the file for the
+     first genuine ASM before slicing (see `find_cadu_sync`). Each CADU is
+     always exactly `unit_bytes` long -- the length the configured RS error
+     correction E and interleave depth predict (`4 + 255*I` bytes) -- never
+     measured from the spacing between ASMs: a real capture commonly wraps
+     each CADU in its own instrument-specific record framing (e.g.
+     RF-Catcher/TestTree's own capture format: a fixed header, the CADU,
+     then a short postamble, repeated per record), which is not part of the
+     CADU and must never be fed into convolutional coding as if it were.
+     The ASM is used only to find where each CADU **starts** (see
+     `find_all_cadu_positions`); whatever lies between the end of one CADU
+     and the next real ASM -- whatever it is, and however long -- is simply
+     skipped. If the configured RS-E/interleave depth predicts a CADU
+     *longer* than the real spacing to the next ASM found in the file, a
+     clear, actionable error is raised (GUI and CLI): the configured
+     settings don't match how these CADUs were actually built.
+2. **Reed-Solomon**: RS(255,223) with E=16 (default) or RS(255,239) with
+   E=8, interleaving at a selectable depth I=1,2,3,4,5,8 (byte `i` goes into
+   sub-stream `i mod I`). CCSDS-native implementation (not a generic RS
+   library): Galois field GF(256) with polynomial F(x)=x^8+x^7+x^2+x+1
+   (0x187, not the "generic" 0x11D), generator polynomial g(x) with roots
+   alpha^(11j) taken directly from the expanded coefficients in the
+   standard's Annex G, and the mandatory **dual-basis (Berlekamp)**
+   representation (4.3.9) applied only to the computed parity (the Transfer
+   Frame bytes stay unchanged, being the "uncoded" part of the CADU -- see
+   Annex F, "Transformational Equivalence"). GF(256), the g(x) coefficients
+   and the dual-basis transform have all been checked against the reference
+   tables and numeric examples the standard itself provides (Table F-1,
+   Annex G, Examples 1-2 of Annex F), as well as for algebraic divisibility
+   of the resulting codeword by all 2E required roots.
+3. **CCSDS pseudo-randomizer** (optional, section 10): a long, 131071-bit
+   sequence (the standard's default since 2023, polynomial x^17+x^14+1) or a
+   short, 255-bit one (legacy, polynomial 1+x^3+x^5+x^7+x^8), via bit-wise
+   XOR applied only to each CADU's RS-encoded block (never to the ASM),
+   reinitialized at every CADU. Both sequences have been validated bit for
+   bit against the reference sequences (first 40 bits) the standard
+   provides.
+4. **ASM** (4 bytes, `0x1ACFFC1D`) prepended to the (randomized or not)
+   block of each CADU -- this is literally what CCSDS calls a CADU.
+5. **Convolutional** K=7, CCSDS polynomials 171/133 octal, rate 1/2 (base)
+   or punctured to 2/3, 3/4, 5/6, 7/8 (Table 3-1); G2 inversion applies only
+   at rate 1/2 (punctured rates use no inversion, per 3.4.1). The encoder
+   runs continuously over the whole stream of concatenated CADUs (ASM
+   included), with the shift register cleared only once at the start of the
+   entire signal (not per-CADU). The ASM is therefore convolutionally
+   encoded along with the rest: for a convolutional stream, receiver-side
+   frame sync is obtained by correlating the ASM in the **already-decoded**
+   bitstream (continuous Viterbi decoding, no sync needed beforehand), not
+   before decoding.
+6. **NRZ-L**: direct bipolar mapping (bit 1 -> +1, bit 0 -> -1), no
+   differential coding.
+7. **Symbol mapping** (`--modulation`, default QPSK): **QPSK Gray** pairs
+   consecutive bipolar samples into I/Q, normalized to unit average energy
+   per symbol; **BPSK** instead carries one bipolar sample per symbol on I
+   only (Q=0), at the same unit energy -- half the bit rate of QPSK at the
+   same symbol rate, but the modulation the base rate-1/2 convolutional
+   code's G2 inversion (3.3.1(5)) is specified against.
+8. **RRC pulse shaping** (configurable alpha, default 0.35).
+9. **Normalization**: the final signal is scaled to a configurable
+   normalized peak amplitude (default 0.9 on a [-1,+1] scale), to leave
+   headroom and prevent saturation/clipping during RF playback.
+10. **Optional resampling**: if requested (CLI `--target-fs` parameter, or
+    "Resample to fixed rate" in the GUI), the signal is resampled
+    (`scipy.signal.resample_poly`, exact integer ratio) to a specific sample
+    rate accepted by the playback instrument, independent of the native
+    `symbol_rate x samples/symbol` frequency used internally by the chain.
+11. **Output**: raw interleaved IQ file (`I0,Q0,I1,Q1,...`, no header), in
+    `float32` (default, range [-1,+1]) or `int16` (selectable; RF-Catcher/
+    TestTree format: little-endian, 12 significant bits in two's complement,
+    LSB-aligned, range [-2048, 2047]), with a companion `.meta.json` file
+    containing the parameters used, the exported file's actual sample
+    rate/format, and a note that the file is baseband (no carrier frequency
+    information: this must be set manually on the playback instrument, e.g.
+    RF-Catcher's TX Freq field).
 
-**Generazione a memoria costante (`export_chain`)**: sia il CLI sia il
-pulsante "Generate export file" della GUI usano `ccsds_chain.pipeline.
-export_chain()`, che processa le CADU a lotti (dimensionati per restare
-intorno a ~64 MB di IQ nativo per lotto) invece di costruire in RAM gli
-interi array bit/bit-codificati/simboli/IQ per l'intero export come fa
-`run_chain()` (usata solo per l'anteprima live, volutamente limitata a un
-numero ridotto di CADU). Il codificatore convoluzionale e il filtro RRC
-mantengono lo stato tra un lotto e l'altro, cosi' il risultato e' identico
-(byte-per-byte per `int16`; per `float32` puo' differire dall'ultimo bit
-della mantissa per rumore di arrotondamento float64, ~9 ordini di
-grandezza sotto il passo di quantizzazione int16) a una singola esecuzione
-non a lotti. La memoria di picco resta quindi dell'ordine del singolo
-lotto indipendentemente dalla durata dell'export -- un export che prima
-esauriva la RAM (killed dall'OOM killer) ora la usa in modo trascurabile.
-Il ricampionamento opzionale (`--target-fs`/"Resample to fixed rate") resta
-l'unico stadio non a lotti (richiede l'intero segnale in memoria per
-`scipy.signal.resample_poly`): un export troppo grande combinato con il
-ricampionamento viene rifiutato subito con un messaggio chiaro, prima di
-avviare la generazione, invece di fallire a meta' di un'esecuzione lunga.
-In GUI il file esportato viene scritto su disco (cartella `output/`, come
-il CLI) e offerto anche in download dal browser solo se resta sotto 1 GB
--- oltre quella soglia resta comunque disponibile al percorso mostrato in
-pagina, perche' il pulsante di download di Streamlit deve comunque
-caricare l'intero file in memoria per servirlo.
+**Constant-memory generation (`export_chain`)**: both the CLI and the GUI's
+"Generate export file" button use `ccsds_chain.pipeline.export_chain()`,
+which processes CADUs in batches (sized to stay around ~64 MB of native IQ
+per batch) instead of building the entire bit/coded-bit/symbol/IQ arrays in
+RAM for the whole export, as `run_chain()` does (used only for the live
+preview, deliberately capped to a small number of CADUs). The convolutional
+encoder and the RRC filter carry their state across batches, so the result
+is identical (byte-for-byte for `int16`; for `float32` it can differ in the
+last mantissa bit due to float64 rounding noise, ~9 orders of magnitude
+below the int16 quantization step) to a single non-batched run. Peak memory
+therefore stays on the order of a single batch regardless of export
+duration -- an export that used to exhaust RAM (killed by the OOM killer)
+now uses a negligible amount. Optional resampling (`--target-fs`/"Resample
+to fixed rate") remains the only non-batched stage (it needs the whole
+signal in memory for `scipy.signal.resample_poly`): an export too large
+combined with resampling is refused immediately with a clear message,
+before generation starts, instead of failing partway through a long run.
+In the GUI, the exported file is written to disk (`output/` folder, same as
+the CLI) and also offered as a browser download only if it stays under
+1 GB -- above that threshold it remains available at the path shown on the
+page, because Streamlit's download button still has to load the entire file
+into memory to serve it.
 
-## Uso
+## Usage
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### GUI (consigliata)
+### GUI (recommended)
 
 ```bash
 streamlit run app.py
 ```
 
-Apre un'interfaccia grafica (dark theme) con tutti i parametri della catena
-nella sidebar. **Ogni modifica a un parametro ricalcola la catena e
-aggiorna in tempo reale**: spettro (PSD con banda -3dB/null-nullo evidenziata),
-costellazione QPSK, estratto I/Q nel tempo, e le metriche (banda occupata,
-durata segnale, tempo di calcolo). Include un indicatore visivo degli
-stadi della pipeline attivi/disattivi ed export diretto del file IQ +
-metadata dal browser (pulsanti "Scarica").
+Opens a graphical interface (dark theme) with all chain parameters in the
+sidebar. **Every parameter change recomputes the chain and updates in real
+time**: spectrum (PSD with the -3dB/null-to-null bandwidth highlighted),
+constellation, I/Q excerpt over time, and metrics (occupied bandwidth,
+signal duration, compute time). Includes a visual indicator of active/
+inactive pipeline stages and direct export of the IQ file + metadata from
+the browser ("Download" buttons).
 
-`app.py` e `generate_signal.py` condividono la stessa implementazione della
-catena (`ccsds_chain/pipeline.py`): non c'e' rischio che GUI e CLI si
-disallineino.
+`app.py` and `generate_signal.py` share the same chain implementation
+(`ccsds_chain/pipeline.py`): there is no risk of the GUI and CLI drifting
+apart.
 
 ### CLI
 
 ```bash
-python generate_signal.py                       # parametri baseline, salva in output/qpsk_ccsds_*.iq
+python generate_signal.py                       # baseline parameters, saves to output/qpsk_ccsds_*.iq
 python generate_signal.py --n-cadu 500 --randomizer long -o test.raw
 python generate_signal.py --rs-e 8 --interleave-depth 2 --conv-rate 3/4 -o test2.raw
-python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # per un Recorder/Replayer RF
+python generate_signal.py --modulation BPSK -o test3.raw
+python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # for an RF Recorder/Replayer
 
 python verify_spectrum.py output/qpsk_ccsds_....iq --plot spectrum.png
 ```
 
-I parametri baseline sono costanti in testa a `generate_signal.py`; le
-opzioni piu' comuni sono anche esposte via CLI (`--help`), incluse quelle
-di formato output (`--dtype`, `--peak`, `--target-fs`). Se `-o`/`--output`
-non e' specificato, il file viene salvato in `output/` con nome
+Baseline parameters are constants at the top of `generate_signal.py`; the
+most common options are also exposed via the CLI (`--help`), including
+output format ones (`--dtype`, `--peak`, `--target-fs`). If `-o`/`--output`
+is not given, the file is saved to `output/` as
 `qpsk_ccsds_<fs>Msps_<n_cadu>cadu_<timestamp>.iq`.
 
-## Limitazioni
+## Limitations
 
-- **Turbo coding e LDPC** (sezioni 6, 7, 8 dello standard) non sono
-  implementati: solo Reed-Solomon, convoluzionale (con puntura) e la loro
-  concatenazione.
-- **Transfer Frame lengths** (sezione 11): lo standard vincola le lunghezze
-  di Transfer Frame ammesse per ciascuno schema di codifica (per garantire
-  compatibilita' con la lunghezza del codeblock, tramite "virtual fill" se
-  necessario). Questo non e' implementato: combinazioni di E / interleave
-  depth / rate convoluzionale / N. CADU che producono un numero dispari di
-  bit codificati falliscono (errore visibile in GUI/CLI, non un crash) sul
-  pairing QPSK. Nella pratica capita solo con rate convoluzionali punturati
-  in combinazioni particolari; la baseline (rate 1/2) non e' mai affetta.
-- **Convenzione NRZ-L**: bit 1 -> +1, bit 0 -> -1; da verificare contro la
-  polarita' attesa dal ricevitore/tool.
-- **Formato file IQ**: raw interleaved (float32/int16, non-header) segue
-  la specifica di formato IQ fornita per il Recorder/Replayer target;
-  resta pero' da confermare con test end-to-end su hardware reale se lo
-  specifico tool "IQ Converter" di RF-Catcher (TestTree) richiede un
-  formato `.rfcatcher` diverso (con header/metadati propri) invece del
-  raw binario prodotto qui.
-- **Payload**: attualmente dati pseudo-casuali di test (o Transfer Frame
-  grezzi da file); non viene costruito un vero header di Transfer Frame
-  CCSDS (VCID, contatori, CRC, ecc.).
-- **Transitorio filtro RRC**: essendo applicato un solo filtro RRC (non una
-  coppia Tx/Rx accoppiata), l'uscita presenta un transitorio di
-  `RRC_SPAN/2` simboli in testa e in coda.
+- **Turbo coding and LDPC** (sections 6, 7, 8 of the standard) are not
+  implemented: only Reed-Solomon, convolutional (with puncturing) and their
+  concatenation.
+- **Transfer Frame lengths** (section 11): the standard constrains the
+  Transfer Frame lengths allowed for each coding scheme (to guarantee
+  compatibility with the codeblock length, via "virtual fill" if needed).
+  This is not implemented: with QPSK, combinations of E / interleave depth /
+  convolutional rate / CADU count that produce an odd number of coded bits
+  fail (a visible error in the GUI/CLI, not a crash) at the QPSK pairing
+  step. In practice this only happens with punctured convolutional rates in
+  specific combinations; the baseline (rate 1/2) is never affected. BPSK
+  (1 bit/symbol) is never affected by this at any rate, since it never
+  pairs bits into a symbol.
+- **NRZ-L convention**: bit 1 -> +1, bit 0 -> -1; to be checked against the
+  polarity expected by the receiver/tool.
+- **IQ file format**: raw interleaved (float32/int16, no header) follows
+  the IQ format spec provided for the target Recorder/Replayer; it still
+  needs to be confirmed with an end-to-end test on real hardware whether
+  RF-Catcher (TestTree)'s "IQ Converter" tool requires a different
+  `.rfcatcher` format (with its own header/metadata) instead of the raw
+  binary produced here.
+- **Payload**: currently pseudo-random test data (or raw Transfer Frames
+  from a file); no real CCSDS Transfer Frame header is constructed (VCID,
+  counters, CRC, etc.).
+- **RRC filter transient**: since only a single RRC filter is applied (not
+  a matched Tx/Rx pair), the output has a transient of `RRC_SPAN/2` symbols
+  at the start and end.
 
 ## TODO
 
-- [ ] Confermare formato input IQ Converter (contattare support@test-tree.com
-      se necessario)
-- [ ] Verificare polarita' NRZ-L attesa
-- [ ] Implementare Turbo coding e LDPC (sezioni 6-8 CCSDS 131.0-B-5), se
-      richiesti da un ricevitore/test specifico
-- [ ] Implementare i vincoli di lunghezza Transfer Frame (sezione 11) e il
-      "virtual fill" per RS (4.3.7-4.3.8), per evitare l'errore di parita'
-      QPSK su combinazioni di parametri non standard
-- [ ] Test end-to-end: generazione -> IQ Converter -> Capture & Playback ->
-      loopback RX
+- [ ] Confirm the IQ Converter's expected input format (contact
+      support@test-tree.com if needed)
+- [ ] Verify the expected NRZ-L polarity
+- [ ] Implement Turbo coding and LDPC (CCSDS 131.0-B-5 sections 6-8), if
+      required by a specific receiver/test
+- [ ] Implement Transfer Frame length constraints (section 11) and RS
+      "virtual fill" (4.3.7-4.3.8), to avoid the QPSK parity error on
+      non-standard parameter combinations
+- [ ] End-to-end test: generation -> IQ Converter -> Capture & Playback ->
+      RX loopback
 
-## Verifica spettro
+## Spectrum verification
 
-`verify_spectrum.py` calcola la PSD (media di periodogrammi con finestra di
-Hanning) e misura la banda occupata a -3dB e la banda null-nullo (larghezza
-del lobo principale tra i primi due null misurati sullo spettro) attorno al
-centro banda. Con i parametri baseline (Rs=1.785 MS/s, alpha=0.35) ci si
-attende una banda occupata a -3dB vicina a Rs (~1.7-1.8 MHz) e una banda
-null-nullo vicina a Rs*(1+alpha) (~2.3-2.4 MHz, valore teorico esatto per un
-filtro RRC ideale).
+`verify_spectrum.py` computes the PSD (averaged Hanning-windowed
+periodograms) and measures the occupied bandwidth at -3dB and the
+null-to-null bandwidth (width of the main lobe between the first two nulls
+measured on the spectrum) around the band center. With the baseline
+parameters (Rs=1.785 MS/s, alpha=0.35), the expected -3dB occupied
+bandwidth is close to Rs (~1.7-1.8 MHz), and the null-to-null bandwidth
+close to Rs*(1+alpha) (~2.3-2.4 MHz, the exact theoretical value for an
+ideal RRC filter).

@@ -12,7 +12,7 @@ import numpy as np
 from .reed_solomon import rs_encode_interleaved
 from .convolutional import conv_encode, ConvEncoder
 from .scrambler import pn_sequence
-from .mapping import bits_to_nrzl, qpsk_gray_map
+from .mapping import BITS_PER_SYMBOL, bits_to_nrzl, map_symbols
 from .pulse_shaping import rrc_taps, pulse_shape, RRCPulseShaper
 from .utils import (bytes_to_bits, find_all_cadu_positions, find_cadu_sync, generate_payload,
                      pack_iq_interleaved, resample_iq)
@@ -105,8 +105,8 @@ class _PayloadPrep:
 
 
 def _validate_chain_params(p: ChainParams) -> None:
-    if p.modulation != "QPSK":
-        raise NotImplementedError(f"modulation {p.modulation!r} not implemented (baseline: QPSK)")
+    if p.modulation not in BITS_PER_SYMBOL:
+        raise NotImplementedError(f"modulation {p.modulation!r} not implemented (expected 'QPSK' or 'BPSK')")
     if p.encoding != "NRZ-L":
         raise NotImplementedError(f"encoding {p.encoding!r} not implemented (baseline: NRZ-L)")
     if p.input_format not in ("transfer_frame", "cadu"):
@@ -324,7 +324,7 @@ def run_chain(
                   if p.fec_conv else bits)
 
     bipolar = bits_to_nrzl(coded_bits)
-    symbols = qpsk_gray_map(bipolar)
+    symbols = map_symbols(bipolar, p.modulation)
 
     if progress_callback is not None:
         progress_callback(_PROGRESS_RS_ASM_WEIGHT + _PROGRESS_CONV_MAP_WEIGHT, "Pulse shaping (RRC filter)...")
@@ -388,7 +388,7 @@ def _native_bytes_per_cadu(p: ChainParams, unit_bytes: int) -> float:
         else:
             num, den = p.conv_rate.split("/")
             conv_expansion = int(den) / int(num)
-    symbols_per_cadu = bits_per_cadu * conv_expansion / 2.0  # QPSK: 2 bits/symbol
+    symbols_per_cadu = bits_per_cadu * conv_expansion / BITS_PER_SYMBOL[p.modulation]
     return symbols_per_cadu * p.sps * 16  # complex128, 16 bytes/sample
 
 
@@ -471,10 +471,12 @@ def export_chain(
     try:
         conv_encoder = ConvEncoder(invert_g2=p.conv_invert_g2, rate=p.conv_rate) if p.fec_conv else None
         shaper = RRCPulseShaper(p.sps, taps)
-        # A single leftover coded bit, when a batch's coded-bit count is
-        # odd (possible with a punctured rate), carried into the next
-        # batch so QPSK's I/Q pairing never splits across a batch boundary
-        # -- see mapping.qpsk_gray_map().
+        bits_per_symbol = BITS_PER_SYMBOL[p.modulation]
+        # Leftover coded bits, when a batch's coded-bit count isn't a whole
+        # number of symbols (possible with a punctured rate), carried into
+        # the next batch so symbol mapping (QPSK's I/Q pairing, or BPSK's
+        # 1:1 mapping) never splits a symbol across a batch boundary -- see
+        # mapping.map_symbols().
         pending_bit = np.empty(0, dtype=np.uint8)
         global_peak = 0.0
         n_symbols = 0
@@ -488,11 +490,12 @@ def export_chain(
                 if len(pending_bit):
                     coded = np.concatenate([pending_bit, coded])
                     pending_bit = np.empty(0, dtype=np.uint8)
-                if len(coded) % 2:
-                    pending_bit = coded[-1:]
-                    coded = coded[:-1]
+                carry = len(coded) % bits_per_symbol
+                if carry:
+                    pending_bit = coded[-carry:]
+                    coded = coded[:-carry]
 
-                symbols = qpsk_gray_map(bits_to_nrzl(coded))
+                symbols = map_symbols(bits_to_nrzl(coded), p.modulation)
                 n_symbols += len(symbols)
                 iq_batch = shaper.shape(symbols)
                 if len(iq_batch):
@@ -513,7 +516,10 @@ def export_chain(
                 scratch.write(tail.tobytes())
 
         if len(pending_bit):
-            raise ValueError("bipolar stream length must be even for QPSK pairing")
+            raise ValueError(
+                f"coded bitstream length isn't a whole number of {p.modulation} symbols "
+                f"({bits_per_symbol} bit(s) each)"
+            )
 
         scale = (peak / global_peak) if global_peak > 0 else 1.0
 
