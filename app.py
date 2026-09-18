@@ -12,14 +12,28 @@ Uso: streamlit run app.py
 import dataclasses
 import datetime
 import json
+import os
 
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from ccsds_chain.pipeline import ChainParams, run_chain
+from ccsds_chain.pipeline import ASM, ChainParams, export_chain, run_chain
 from ccsds_chain.spectrum import welch_psd
-from ccsds_chain.utils import normalize_peak, resample_iq, pack_iq_interleaved, resample_ratio
+from ccsds_chain.utils import find_cadu_sync, resample_ratio
+
+# Exported IQ files are written here (same convention as generate_signal.py's
+# CLI default) rather than held fully in memory: export_chain() streams
+# straight to disk in bounded-memory batches regardless of export size, so
+# large exports no longer need to fit in RAM to be generated.
+EXPORT_DIR = "output"
+
+# Above this size, the generated file is left on disk (its path is always
+# shown) but not also offered through st.download_button: Streamlit reads
+# a download's data fully into memory to serve it, so a very large file
+# would reintroduce the same peak-memory problem export_chain() avoids for
+# generation, just at download time instead.
+_DOWNLOAD_BUTTON_SIZE_LIMIT = 1 * 1024 ** 3
 
 BITS_PER_SYMBOL = {"QPSK": 2}
 
@@ -147,27 +161,63 @@ with st.sidebar:
         symbol_rate = bit_rate // bits_per_symbol
         st.caption(f"Symbol rate (derived): {symbol_rate:,.0f} S/s".replace(",", " "))
 
+    st.markdown("### Input")
+    input_format_label = st.radio(
+        "Payload contains", ["Transfer Frame (unencoded)", "CADU (already ASM+RS encoded)"],
+        horizontal=True,
+        help=(
+            "What the payload below actually is. 'Transfer Frame' is raw, "
+            "uncoded data: RS, the pseudo-randomizer and the ASM are all "
+            "applied further down to build the CADUs from it. 'CADU' means "
+            "the bytes are already complete CADUs (ASM + RS-encoded "
+            "codeblock, already pseudo-randomized if that's how they were "
+            "built) -- e.g. captured or previously generated CADUs -- so RS, "
+            "the randomizer and the ASM prepend are all skipped to avoid "
+            "double-encoding a second layer on top; only the convolutional "
+            "stage below (if enabled) is still applied, exactly as it would "
+            "be by a physical coder sitting downstream of an already-formed "
+            "CADU stream."
+        ),
+    )
+    is_cadu_input = input_format_label.startswith("CADU")
+    input_format = "cadu" if is_cadu_input else "transfer_frame"
+    if is_cadu_input:
+        st.caption(
+            "CADU input: RS encoding, pseudo-randomizer and ASM prepend below "
+            "are skipped (the uploaded CADUs already carry them). RS/interleave "
+            "settings are still used to know each CADU's byte length."
+        )
+
     st.markdown("### FEC")
-    fec_rs = st.checkbox("Reed-Solomon", value=True)
+    fec_rs = st.checkbox(
+        "Reed-Solomon", value=True, disabled=is_cadu_input,
+        help="Not re-applied in CADU mode: the input already carries its RS parity." if is_cadu_input else None,
+    )
     rs_col1, rs_col2 = st.columns(2)
     with rs_col1:
         rs_e = st.selectbox(
-            "Error correction E", [16, 8], disabled=not fec_rs,
+            "Error correction E", [16, 8], disabled=not fec_rs and not is_cadu_input,
             help=(
                 "RS error-correction capability, in symbols (CCSDS 4.3.1, managed "
                 "parameter 12.5). E=16 gives RS(255,223): more parity overhead, "
                 "corrects up to 16 symbol errors per codeword. E=8 gives "
                 "RS(255,239): less overhead, corrects up to 8."
+                + (" In CADU mode this must match how the uploaded CADUs were "
+                   "actually built, since it's used to work out each CADU's "
+                   "byte length." if is_cadu_input else "")
             ),
         )
     with rs_col2:
         interleave_depth = st.selectbox(
-            "Interleave depth I", [1, 2, 3, 4, 5, 8], index=4, disabled=not fec_rs,
+            "Interleave depth I", [1, 2, 3, 4, 5, 8], index=4, disabled=not fec_rs and not is_cadu_input,
             help=(
                 "Number of RS codewords interleaved together per CADU (CCSDS "
                 "4.3.5, managed parameter 12.5). Higher I spreads a burst error "
                 "across more codewords (each corrects a smaller share of it) at "
                 "the cost of a larger CADU."
+                + (" In CADU mode this must match how the uploaded CADUs were "
+                   "actually built, since it's used to work out each CADU's "
+                   "byte length." if is_cadu_input else "")
             ),
         )
     rs_k = 255 - 2 * rs_e
@@ -175,6 +225,10 @@ with st.sidebar:
     # the data-zone size of one CADU at the current RS/interleave settings,
     # needed below to tell how many complete CADUs a Transfer Frame file holds.
     frame_bytes = rs_k * interleave_depth
+    # Full CADU length (ASM + RS-coded codeblock), needed below when the
+    # uploaded file already contains complete CADUs rather than raw frames.
+    cadu_unit_bytes = len(ASM) + 255 * interleave_depth
+    unit_bytes = cadu_unit_bytes if is_cadu_input else frame_bytes
 
     fec_conv = st.checkbox("Convolutional K=7", value=True)
     conv_rate = st.selectbox(
@@ -198,12 +252,15 @@ with st.sidebar:
 
     randomizer_label = st.selectbox(
         "Pseudo-randomizer", ["Long (131071-bit)", "Short (255-bit, legacy)", "None"],
+        disabled=is_cadu_input,
         help=(
             "CCSDS section 10: scrambles the RS-coded data (never the ASM) to "
             "guarantee bit transitions, avoid spectral lines, and aid receiver "
             "acquisition. 'Long' is the current standard default (Issue 5, "
             "2023, managed parameter 12.3); 'Short' is kept only for backward "
             "compatibility with legacy systems."
+            + (" Not re-applied in CADU mode: the input is already randomized "
+               "if that's how the uploaded CADUs were built." if is_cadu_input else "")
         ),
     )
     randomizer = {"Long (131071-bit)": "long", "Short (255-bit, legacy)": "short", "None": "none"}[randomizer_label]
@@ -243,7 +300,8 @@ with st.sidebar:
     )
 
     st.markdown("### Payload & Duration")
-    payload_mode = st.radio("Payload source", ["Pseudo-random", "Transfer Frame file"], horizontal=True)
+    file_upload_label = "CADU file" if is_cadu_input else "Transfer Frame file"
+    payload_mode = st.radio("Payload source", ["Pseudo-random", file_upload_label], horizontal=True)
     payload_source_bytes = None
     seed = 42
     file_cadu_count = None
@@ -259,21 +317,43 @@ with st.sidebar:
             ),
         )
     else:
-        uploaded = st.file_uploader("Transfer Frame (binary)", type=None)
+        uploaded = st.file_uploader(
+            "CADU (binary)" if is_cadu_input else "Transfer Frame (binary)", type=None,
+        )
         if uploaded is not None:
             payload_source_bytes = uploaded.read()
-            file_cadu_count = len(payload_source_bytes) // frame_bytes
-            leftover_bytes = len(payload_source_bytes) - file_cadu_count * frame_bytes
+            sync_skipped_bytes = 0
+            usable_bytes = payload_source_bytes
+            if is_cadu_input:
+                # A real/captured CADU file isn't guaranteed to start exactly
+                # on a CADU boundary (leading idle line-fill, or an excerpt
+                # starting mid-stream): locate the first real ASM instead of
+                # blindly slicing from byte 0, or CADU boundaries end up
+                # misaligned with whatever junk precedes the real stream.
+                try:
+                    sync_skipped_bytes = find_cadu_sync(payload_source_bytes, ASM)
+                except ValueError:
+                    st.error(
+                        f"No ASM (0x{ASM.hex()}) found anywhere in the uploaded file: "
+                        "cannot locate a CADU boundary to synchronize to."
+                    )
+                    st.stop()
+                usable_bytes = payload_source_bytes[sync_skipped_bytes:]
+            file_cadu_count = len(usable_bytes) // unit_bytes
+            leftover_bytes = len(usable_bytes) - file_cadu_count * unit_bytes
             if file_cadu_count < 1:
                 st.error(
-                    f"File too short: {len(payload_source_bytes)} bytes, but one CADU "
-                    f"needs {frame_bytes} bytes at the current RS/interleave settings "
-                    f"(RS(255,{rs_k}) x interleave {interleave_depth})."
+                    f"File too short: {len(usable_bytes)} usable bytes after sync, but one "
+                    f"CADU needs {unit_bytes} bytes at the current RS/interleave settings "
+                    f"(RS(255,{rs_k}) x interleave {interleave_depth}"
+                    f"{', + 4-byte ASM' if is_cadu_input else ''})."
                 )
                 st.stop()
             st.caption(
-                f"File contains {file_cadu_count} complete CADU{'s' if file_cadu_count != 1 else ''} "
-                f"of {frame_bytes} bytes each"
+                (f"Synced to the first CADU after skipping {sync_skipped_bytes} leading "
+                 f"byte{'s' if sync_skipped_bytes != 1 else ''} of unframed data -- " if sync_skipped_bytes else "")
+                + f"File contains {file_cadu_count} complete CADU{'s' if file_cadu_count != 1 else ''} "
+                f"of {unit_bytes} bytes each"
                 + (f", {leftover_bytes} trailing bytes ignored (not a full CADU)" if leftover_bytes else "")
                 + " -- generation uses exactly these, no padding."
             )
@@ -311,6 +391,7 @@ params = ChainParams(
     conv_rate=conv_rate,
     conv_invert_g2=invert_g2,
     randomizer=randomizer,
+    input_format=input_format,
     n_cadu=int(n_cadu),
     payload_bytes=payload_source_bytes,
     seed=int(seed),
@@ -343,10 +424,10 @@ with panel:
         return f'<span class="{cls}">{label}</span>'
 
     stages_html = '<div class="stage-row">' + '<span class="arrow">&rarr;</span>'.join([
-        chip("PAYLOAD", True),
-        chip(f"RS(255,{rs_k}) I={interleave_depth}", fec_rs),
-        chip(randomizer_label.split(" ")[0].upper(), randomizer != "none"),
-        chip("+ASM", True),
+        chip("CADU (in)" if is_cadu_input else "PAYLOAD", True),
+        chip(f"RS(255,{rs_k}) I={interleave_depth}" + (" [in CADU]" if is_cadu_input else ""), fec_rs and not is_cadu_input),
+        chip(randomizer_label.split(" ")[0].upper() + (" [in CADU]" if is_cadu_input else ""), randomizer != "none" and not is_cadu_input),
+        chip("+ASM" + (" [in CADU]" if is_cadu_input else ""), not is_cadu_input),
         chip(f"CONV K=7 r={conv_rate}", fec_conv),
         chip("NRZ-L", True),
         chip("QPSK GRAY", True),
@@ -503,13 +584,13 @@ with panel:
     native_fs = params.symbol_rate * params.sps
     exp_col1, exp_col2 = st.columns([1, 2])
     with exp_col1:
-        if payload_mode == "Transfer Frame file" and file_cadu_count is not None:
+        if payload_mode == file_upload_label and file_cadu_count is not None:
             export_n_cadu = st.number_input(
                 "Export CADU count", min_value=1, max_value=int(file_cadu_count),
                 value=int(file_cadu_count), step=1,
                 help=(
                     f"Capped at the {file_cadu_count} complete CADUs available in "
-                    "the uploaded Transfer Frame file: generation never pads with "
+                    f"the uploaded {file_upload_label.lower()}: generation never pads with "
                     "extra data, so this can't exceed what the file actually "
                     "contains. Lower it to export only a leading subset."
                 ),
@@ -579,7 +660,7 @@ with panel:
 
     export_key = (
         export_n_cadu, params.rs_e, params.interleave_depth, params.fec_rs, params.fec_conv,
-        params.conv_rate, params.conv_invert_g2, params.randomizer, params.rrc_alpha,
+        params.conv_rate, params.conv_invert_g2, params.randomizer, params.input_format, params.rrc_alpha,
         params.rrc_span, params.sps, params.symbol_rate, params.seed, payload_mode,
         output_dtype, output_peak, resample_enabled, target_fs if resample_enabled else None,
     )
@@ -590,60 +671,78 @@ with panel:
         def _update_progress(frac: float, message: str) -> None:
             progress_bar.progress(min(max(frac, 0.0), 1.0), text=message)
 
+        # Clean up the previous export's file before starting a new one --
+        # export_chain() writes straight to disk, so nothing here holds a
+        # reference that would do this automatically.
+        prev = st.session_state.get("export_data")
+        if prev is not None and os.path.exists(prev["path"]):
+            try:
+                os.remove(prev["path"])
+            except OSError:
+                pass
+
+        os.makedirs(EXPORT_DIR, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_fs_for_name = target_fs if resample_enabled else native_fs
+        out_path = os.path.join(
+            EXPORT_DIR, f"qpsk_ccsds_{out_fs_for_name/1e6:.1f}Msps_{export_n_cadu}cadu_{timestamp}.iq")
+
         try:
-            export_result = run_chain(export_params, progress_callback=_update_progress)
-            iq = normalize_peak(export_result.iq, output_peak)
-            output_fs = export_result.sample_rate
-            if resample_enabled and target_fs != export_result.sample_rate:
-                progress_bar.progress(1.0, text="Resampling...")
-                iq = resample_iq(iq, export_result.sample_rate, target_fs)
-                output_fs = target_fs
-            progress_bar.empty()
-            with st.spinner("Packing output file..."):
-                meta = dict(export_result.meta)
-                meta.update({
-                    "format": "raw interleaved, no header (I0,Q0,I1,Q1,...)",
-                    "output_dtype": output_dtype,
-                    "output_peak": output_peak,
-                    "output_sample_rate": output_fs,
-                    "output_n_samples": len(iq),
-                    "output_duration_s": len(iq) / output_fs,
-                    "carrier_note": "file is baseband IQ (no carrier/frequency information); "
-                                     "set the intended RF center frequency manually on the playback instrument",
-                })
-                iq_bytes = pack_iq_interleaved(iq, output_dtype)
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                st.session_state["export_data"] = {
-                    "iq_bytes": iq_bytes,
-                    "meta_bytes": json.dumps(meta, indent=2).encode(),
-                    "filename": f"qpsk_ccsds_{output_fs/1e6:.1f}Msps_{export_n_cadu}cadu_{timestamp}.iq",
-                    "caption": (
-                        f"Format: raw interleaved {output_dtype} (I0,Q0,I1,Q1,...) &middot; "
-                        f"{len(iq_bytes)/1e6:.2f} MB &middot; {len(iq):,} samples @ "
-                        f"{output_fs/1e6:.3f} MS/s &middot; CADU: {export_n_cadu} x {export_result.cadu_bytes} bytes"
-                    ),
-                }
-                st.session_state["export_key"] = export_key
-        except MemoryError:
-            progress_bar.empty()
-            st.error(
-                f"Out of memory generating ~{export_mb:,.0f} MB of samples ({export_n_cadu:,} CADUs). "
-                "Reduce the export size (fewer CADUs, or resample to a lower target rate) and try again."
-                .replace(",", " ")
+            # export_chain() processes CADUs in bounded-memory batches and
+            # streams straight to out_path, so peak memory stays roughly
+            # constant regardless of export_n_cadu -- unlike the old
+            # run_chain()-based export, which built the whole bits/coded-
+            # bits/symbols/IQ arrays in memory for the entire export at
+            # once and could run out of memory on a large one.
+            export_result = export_chain(
+                export_params, out_path, output_dtype=output_dtype, peak=output_peak,
+                target_fs=target_fs if resample_enabled else None,
+                progress_callback=_update_progress,
             )
+            progress_bar.empty()
+            meta = export_result["meta"]
+            file_size = os.path.getsize(out_path)
+            st.session_state["export_data"] = {
+                "path": out_path,
+                "meta_bytes": json.dumps(meta, indent=2).encode(),
+                "filename": os.path.basename(out_path),
+                "file_size": file_size,
+                "caption": (
+                    f"Format: raw interleaved {output_dtype} (I0,Q0,I1,Q1,...) &middot; "
+                    f"{file_size/1e6:.2f} MB &middot; {meta['output_n_samples']:,} samples @ "
+                    f"{meta['output_sample_rate']/1e6:.3f} MS/s &middot; "
+                    f"CADU: {export_n_cadu} x {export_result['cadu_bytes']} bytes"
+                ),
+            }
+            st.session_state["export_key"] = export_key
+        except MemoryError as e:
+            progress_bar.empty()
+            st.error(f"Export failed: {e}")
 
     if "export_data" in st.session_state:
         data = st.session_state["export_data"]
         dl_col1, dl_col2 = st.columns([1, 3])
         with dl_col1:
-            st.download_button("Download IQ file", data=data["iq_bytes"],
-                                file_name=data["filename"], mime="application/octet-stream",
-                                width='stretch')
+            if not os.path.exists(data["path"]):
+                st.warning(f"Export file no longer found at `{data['path']}` (was it moved or deleted?).")
+            elif data["file_size"] <= _DOWNLOAD_BUTTON_SIZE_LIMIT:
+                with open(data["path"], "rb") as f:
+                    iq_bytes = f.read()
+                st.download_button("Download IQ file", data=iq_bytes,
+                                    file_name=data["filename"], mime="application/octet-stream",
+                                    width='stretch')
+            else:
+                st.info(
+                    f"File too large ({data['file_size']/1e6:,.0f} MB) to also offer as a "
+                    "browser download here -- it's already saved to disk at the path below; "
+                    "retrieve it directly from there.".replace(",", " ")
+                )
             st.download_button("Download metadata (.json)", data=data["meta_bytes"],
                                 file_name=data["filename"].rsplit(".", 1)[0] + ".meta.json",
                                 mime="application/json", width='stretch')
         with dl_col2:
             st.caption(data["caption"])
+            st.caption(f"Saved to: `{data['path']}`")
             if st.session_state.get("export_key") != export_key:
                 st.caption("Note: parameters changed since this file was generated -- click 'Generate export file' again to refresh.")
     else:

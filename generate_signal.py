@@ -9,6 +9,11 @@ K=7, rate 1/2 (or punctured to 2/3, 3/4, 5/6, 7/8) over the CADU stream
 (ASM included) -> NRZ-L -> QPSK (Gray) -> RRC -> peak-normalize -> optional
 resample -> raw interleaved IQ (float32 or int16), no header.
 
+With --input-format cadu, the payload is instead treated as already-complete
+CADUs (ASM + RS-encoded, already pseudo-randomized if that's how they were
+built): RS, the randomizer and the ASM prepend are all skipped to avoid
+double-encoding, and only the convolutional stage onward still runs.
+
 See README.md for architecture assumptions, limitations, and open TODOs
 before using the output against real ground equipment. For an interactive
 GUI with a real-time spectrum view, see `streamlit run app.py`.
@@ -19,8 +24,8 @@ import datetime
 import json
 import os
 
-from ccsds_chain.pipeline import ChainParams, run_chain
-from ccsds_chain.utils import normalize_peak, resample_iq, pack_iq_interleaved, resample_ratio
+from ccsds_chain.pipeline import ChainParams, export_chain
+from ccsds_chain.utils import resample_ratio
 
 # --------------------------------------------------------------------------
 # PARAMETRI CONFIGURABILI (rif. AWS-OSE-ICD-0063, baseline CCSDS 131.0-B-2)
@@ -46,8 +51,9 @@ RANDOMIZER = "none"            # "none", "short" (255-bit, legacy), "long" (1310
 
 ASM = bytes.fromhex("1ACFFC1D")  # 4 byte, non codificato
 
+INPUT_FORMAT = "transfer_frame"  # "transfer_frame" (default) o "cadu" (dati gia' ASM+RS codificati)
 N_CADU = 100                   # numero di CADU da generare (durata segnale)
-PAYLOAD_SOURCE = None          # path a file con Transfer Frame reali, o None = pseudo-random
+PAYLOAD_SOURCE = None          # path a file con Transfer Frame reali (o CADU, se --input-format cadu), o None = pseudo-random
 PAYLOAD_SEED = 42              # seed per riproducibilita' del payload pseudo-random
 
 OUTPUT_DTYPE = "float32"       # "float32" ([-1,+1]) o "int16" (12 bit, formato RF-Catcher, [-2048,2047])
@@ -72,6 +78,11 @@ def build_cli():
     p.add_argument("--randomizer", choices=["none", "short", "long"], default=RANDOMIZER,
                     help="CCSDS pseudo-randomizer: 'long' (131071-bit, current standard default), "
                          "'short' (255-bit, legacy), or 'none'")
+    p.add_argument("--input-format", choices=["transfer_frame", "cadu"], default=INPUT_FORMAT,
+                    help="what --payload-source/the generated payload represents: 'transfer_frame' "
+                         "(raw, uncoded data -- RS/randomizer/ASM applied here, default) or 'cadu' "
+                         "(already complete CADUs -- ASM+RS[+randomizer] are NOT re-applied, to avoid "
+                         "double-encoding; only the convolutional stage still runs on it)")
     p.add_argument("--payload-source", type=str, default=PAYLOAD_SOURCE)
     p.add_argument("--seed", type=int, default=PAYLOAD_SEED)
     p.add_argument("--dtype", choices=["float32", "int16"], default=OUTPUT_DTYPE,
@@ -107,18 +118,27 @@ def main():
         conv_invert_g2=CONV_INVERT_G2 and not args.no_invert_g2,
         randomizer=args.randomizer,
         asm=ASM,
+        input_format=args.input_format,
         n_cadu=args.n_cadu,
         payload_source=args.payload_source,
         seed=args.seed,
     )
+    is_cadu_input = params.input_format == "cadu"
+    unit_bytes = len(params.asm) + params.rs_n * params.interleave_depth if is_cadu_input else params.rs_k * params.interleave_depth
 
-    print(f"[1/9] Generazione payload: {params.n_cadu} CADU x {params.rs_k * params.interleave_depth} byte "
-          f"({'file: ' + params.payload_source if params.payload_source else 'pseudo-random, seed=' + str(params.seed)})")
-    print(f"[2/9] RS({params.rs_n},{params.rs_k}) E={params.rs_e} encode, interleave depth {params.interleave_depth}"
-          f"{' (SKIPPED)' if not params.fec_rs else ''}")
-    print(f"[3/9] Pseudo-randomizer CCSDS ({params.randomizer}, excludes ASM)"
-          f"{'' if params.randomizer != 'none' else ' (SKIPPED)'}")
-    print("[4/9] ASM (0x1ACFFC1D) attached per CADU (forms the CADU)")
+    print(f"[1/9] Generazione payload: {params.n_cadu} CADU x {unit_bytes} byte "
+          f"({'file: ' + params.payload_source if params.payload_source else 'pseudo-random, seed=' + str(params.seed)}), "
+          f"input-format={params.input_format}")
+    if is_cadu_input:
+        print("[2/9] RS SKIPPED -- input already contains complete, RS-encoded CADUs")
+        print("[3/9] Pseudo-randomizer SKIPPED -- input already randomized if that's how the CADUs were built")
+        print("[4/9] ASM SKIPPED -- input already carries it per CADU")
+    else:
+        print(f"[2/9] RS({params.rs_n},{params.rs_k}) E={params.rs_e} encode, interleave depth {params.interleave_depth}"
+              f"{' (SKIPPED)' if not params.fec_rs else ''}")
+        print(f"[3/9] Pseudo-randomizer CCSDS ({params.randomizer}, excludes ASM)"
+              f"{'' if params.randomizer != 'none' else ' (SKIPPED)'}")
+        print("[4/9] ASM (0x1ACFFC1D) attached per CADU (forms the CADU)")
     print(f"[5/9] Convolutional K=7 rate {params.conv_rate} over the CADU stream, ASM included "
           f"(G1=171o, G2=133o, invert_g2={params.conv_invert_g2 and params.conv_rate == '1/2'})"
           f"{' (SKIPPED)' if not params.fec_conv else ''}")
@@ -126,18 +146,12 @@ def main():
     print("[7/9] QPSK mapping (Gray, unit energy)")
     print(f"[8/9] Pulse shaping RRC (alpha={params.rrc_alpha}, span={params.rrc_span}, sps={params.sps})")
 
-    result = run_chain(params)
-
-    print(f"       -> {params.n_cadu} CADU x {result.cadu_bytes} byte")
-
-    iq = normalize_peak(result.iq, args.peak)
-    output_fs = result.sample_rate
-    if args.target_fs is not None and args.target_fs != result.sample_rate:
-        up, down = resample_ratio(result.sample_rate, args.target_fs)
-        print(f"[9/9] Resampling {result.sample_rate/1e6:.3f} MS/s -> {args.target_fs/1e6:.3f} MS/s "
+    native_fs = params.symbol_rate * params.sps
+    output_fs = args.target_fs if (args.target_fs is not None and args.target_fs != native_fs) else native_fs
+    if output_fs != native_fs:
+        up, down = resample_ratio(native_fs, output_fs)
+        print(f"[9/9] Resampling {native_fs/1e6:.3f} MS/s -> {output_fs/1e6:.3f} MS/s "
               f"(ratio {up}/{down}, scipy.signal.resample_poly), format={args.dtype}, peak={args.peak}")
-        iq = resample_iq(iq, result.sample_rate, args.target_fs)
-        output_fs = args.target_fs
     else:
         print(f"[9/9] No resampling (native {output_fs/1e6:.3f} MS/s), format={args.dtype}, peak={args.peak}")
 
@@ -148,31 +162,33 @@ def main():
         output_path = os.path.join(
             OUTPUT_DIR, f"qpsk_ccsds_{output_fs/1e6:.1f}Msps_{params.n_cadu}cadu_{timestamp}.iq")
 
-    iq_bytes = pack_iq_interleaved(iq, args.dtype)
-    with open(output_path, "wb") as f:
-        f.write(iq_bytes)
+    # export_chain() processes CADUs in bounded-memory batches and streams
+    # straight to output_path, so peak memory stays roughly constant
+    # regardless of n_cadu (export duration) -- unlike building the whole
+    # bits/coded-bits/symbols/IQ arrays in memory at once, which is what
+    # run_chain() does (fine for the GUI's small live preview, not for a
+    # potentially large export like this one).
+    export_result = export_chain(
+        params, output_path, output_dtype=args.dtype, peak=args.peak,
+        target_fs=args.target_fs,
+    )
 
-    duration_s = len(iq) / output_fs
-    meta = dict(result.meta)
-    meta.update({
-        "format": "raw interleaved, no header (I0,Q0,I1,Q1,...)",
-        "output_dtype": args.dtype,
-        "output_peak": args.peak,
-        "output_sample_rate": output_fs,
-        "output_n_samples": len(iq),
-        "output_duration_s": duration_s,
-        "carrier_note": "file is baseband IQ (no carrier/frequency information); "
-                         "set the intended RF center frequency manually on the playback instrument",
-    })
+    skipped = export_result["meta"].get("cadu_sync_skipped_bytes")
+    if skipped:
+        print(f"       -> synced to first CADU boundary, skipped {skipped} leading byte(s) of unframed data")
+    print(f"       -> {params.n_cadu} CADU x {export_result['cadu_bytes']} byte")
+
     meta_path = output_path.rsplit(".", 1)[0] + ".meta.json"
     with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
+        json.dump(export_result["meta"], f, indent=2)
 
-    print(f"\nCompletato in {result.elapsed:.2f}s")
-    print(f"  Simboli QPSK:  {len(result.symbols)}")
-    print(f"  Campioni IQ:   {len(iq)}  @ {output_fs / 1e6:.3f} MS/s (formato {args.dtype})")
-    print(f"  Durata segnale: {duration_s * 1000:.2f} ms")
-    print(f"  Output:        {output_path} ({len(iq_bytes) / 1e6:.2f} MB)")
+    output_n_samples = export_result["meta"]["output_n_samples"]
+    output_bytes = os.path.getsize(output_path)
+    print(f"\nCompletato in {export_result['elapsed']:.2f}s")
+    print(f"  Simboli QPSK:  {export_result['meta']['n_symbols']}")
+    print(f"  Campioni IQ:   {output_n_samples}  @ {output_fs / 1e6:.3f} MS/s (formato {args.dtype})")
+    print(f"  Durata segnale: {export_result['meta']['output_duration_s'] * 1000:.2f} ms")
+    print(f"  Output:        {output_path} ({output_bytes / 1e6:.2f} MB)")
     print(f"  Metadata:      {meta_path}")
 
 

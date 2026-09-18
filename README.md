@@ -50,8 +50,18 @@ payload -> RS(255,223) interleave x5 -> [scrambler, esclude ASM]
         -> NRZ-L -> QPSK (Gray) -> RRC -> IQ int16 (RF-Catcher)
 ```
 
-1. **Payload**: dati pseudo-casuali riproducibili (seed) per CADU, oppure
-   Transfer Frame reali da file (`--payload-source`).
+1. **Payload**: dati pseudo-casuali riproducibili (seed) per CADU, oppure dati
+   reali da file (`--payload-source`). Il formato di questi dati e' selezionabile
+   con `--input-format` (o, in GUI, "Payload contains"):
+   - `transfer_frame` (default): Transfer Frame grezze, non codificate. RS,
+     pseudo-randomizer e ASM vengono tutti applicati qui per costruire i CADU.
+   - `cadu`: CADU gia' completi (ASM + blocco RS-codificato, gia'
+     pseudo-randomizzato se e' cosi' che sono stati costruiti) -- ad es. CADU
+     catturati o generati in precedenza. In questo caso RS, randomizer e ASM
+     **non** vengono riapplicati (per evitare una doppia codifica e un secondo
+     ASM davanti a dati che ne hanno gia' uno); viene comunque applicata,
+     se abilitata, la sola codifica convoluzionale sul flusso di CADU, esattamente
+     come farebbe un codificatore fisico a valle di un flusso di CADU gia' formato.
 2. **Reed-Solomon**: RS(255,223) con E=16 (default) o RS(255,239) con E=8,
    interleaving a profondita' I=1,2,3,4,5,8 selezionabile (byte `i` va nel
    sotto-stream `i mod I`). Implementazione CCSDS-nativa (non una libreria
@@ -108,6 +118,31 @@ payload -> RS(255,223) interleave x5 -> [scrambler, esclude ASM]
     in banda base (nessuna informazione di frequenza portante: va
     impostata manualmente sullo strumento di playback, es. il campo TX
     Freq di RF-Catcher).
+
+**Generazione a memoria costante (`export_chain`)**: sia il CLI sia il
+pulsante "Generate export file" della GUI usano `ccsds_chain.pipeline.
+export_chain()`, che processa le CADU a lotti (dimensionati per restare
+intorno a ~64 MB di IQ nativo per lotto) invece di costruire in RAM gli
+interi array bit/bit-codificati/simboli/IQ per l'intero export come fa
+`run_chain()` (usata solo per l'anteprima live, volutamente limitata a un
+numero ridotto di CADU). Il codificatore convoluzionale e il filtro RRC
+mantengono lo stato tra un lotto e l'altro, cosi' il risultato e' identico
+(byte-per-byte per `int16`; per `float32` puo' differire dall'ultimo bit
+della mantissa per rumore di arrotondamento float64, ~9 ordini di
+grandezza sotto il passo di quantizzazione int16) a una singola esecuzione
+non a lotti. La memoria di picco resta quindi dell'ordine del singolo
+lotto indipendentemente dalla durata dell'export -- un export che prima
+esauriva la RAM (killed dall'OOM killer) ora la usa in modo trascurabile.
+Il ricampionamento opzionale (`--target-fs`/"Resample to fixed rate") resta
+l'unico stadio non a lotti (richiede l'intero segnale in memoria per
+`scipy.signal.resample_poly`): un export troppo grande combinato con il
+ricampionamento viene rifiutato subito con un messaggio chiaro, prima di
+avviare la generazione, invece di fallire a meta' di un'esecuzione lunga.
+In GUI il file esportato viene scritto su disco (cartella `output/`, come
+il CLI) e offerto anche in download dal browser solo se resta sotto 1 GB
+-- oltre quella soglia resta comunque disponibile al percorso mostrato in
+pagina, perche' il pulsante di download di Streamlit deve comunque
+caricare l'intero file in memoria per servirlo.
 
 ## Uso
 

@@ -33,20 +33,20 @@ _WEIGHTS = (1 << np.arange(K)).astype(np.uint8)  # column c (oldest..newest) -> 
 _CHUNK_BITS = 2_000_000
 
 
-def _base_rate_half_encode(bits: np.ndarray, invert_g2: bool) -> tuple:
-    """Returns (g1, g2) arrays, one output bit per input bit.
+def _rate_half_encode_from_history(bits: np.ndarray, invert_g2: bool, history: np.ndarray) -> tuple:
+    """Returns (g1, g2, new_history): one output bit per input bit, plus the
+    K-1 trailing bits to carry as shift-register state into a *later* call
+    on the next chunk of the same continuous bitstream.
 
-    Processed in fixed-size chunks, carrying the last K-1 bits of each
-    chunk as the shift-register state for the next one, so the encoder
-    stays a single continuous register across the whole bitstream (as if
-    unchunked) while peak memory stays bounded regardless of len(bits).
+    Processed in fixed-size sub-chunks internally so peak memory stays
+    bounded regardless of len(bits), same as before this was split out for
+    reuse by the stateful `ConvEncoder` below.
     """
     bits = np.asarray(bits, dtype=np.uint8)
     n = len(bits)
     g1 = np.empty(n, dtype=np.uint8)
     g2 = np.empty(n, dtype=np.uint8)
 
-    history = np.zeros(K - 1, dtype=np.uint8)
     for start in range(0, n, _CHUNK_BITS):
         end = min(start + _CHUNK_BITS, n)
         chunk = bits[start:end]
@@ -61,7 +61,34 @@ def _base_rate_half_encode(bits: np.ndarray, invert_g2: bool) -> tuple:
 
     if invert_g2:
         g2 = 1 - g2
-    return g1, g2
+    return g1, g2, history
+
+
+def _puncture(g1: np.ndarray, g2: np.ndarray, rate: str, phase: int) -> tuple:
+    """Interleave and puncture (g1, g2) per Table 3-1, starting at puncture
+    pattern position `phase` (so a later call can resume mid-period for a
+    continuous punctured stream split across chunks). Returns (out, new_phase)."""
+    pattern = PUNCTURE_PATTERNS[rate]
+    n = len(g1)
+    if pattern is None:
+        out = np.empty(2 * n, dtype=np.uint8)
+        out[0::2] = g1
+        out[1::2] = g2
+        return out, 0
+
+    c1_pattern, c2_pattern = pattern
+    period = len(c1_pattern)
+    idx = (np.arange(n) + phase) % period
+    c1_mask = np.array(c1_pattern, dtype=bool)[idx]
+    c2_mask = np.array(c2_pattern, dtype=bool)[idx]
+
+    interleaved = np.empty(2 * n, dtype=np.uint8)
+    interleaved[0::2] = g1
+    interleaved[1::2] = g2
+    keep = np.empty(2 * n, dtype=bool)
+    keep[0::2] = c1_mask
+    keep[1::2] = c2_mask
+    return interleaved[keep], (phase + n) % period
 
 
 def conv_encode(bits: np.ndarray, invert_g2: bool = True, rate: str = "1/2") -> np.ndarray:
@@ -75,26 +102,32 @@ def conv_encode(bits: np.ndarray, invert_g2: bool = True, rate: str = "1/2") -> 
     if rate not in PUNCTURE_PATTERNS:
         raise ValueError(f"unsupported convolutional code rate {rate!r}")
 
-    g1, g2 = _base_rate_half_encode(bits, invert_g2 and rate == "1/2")
+    g1, g2, _ = _rate_half_encode_from_history(bits, invert_g2 and rate == "1/2", np.zeros(K - 1, dtype=np.uint8))
+    out, _ = _puncture(g1, g2, rate, 0)
+    return out
 
-    pattern = PUNCTURE_PATTERNS[rate]
-    if pattern is None:
-        out = np.empty(2 * len(bits), dtype=np.uint8)
-        out[0::2] = g1
-        out[1::2] = g2
+
+class ConvEncoder:
+    """Stateful counterpart to `conv_encode()`, for encoding a single
+    continuous bitstream a chunk at a time (e.g. batched/streaming export):
+    carries the shift-register history and puncture-pattern phase across
+    `encode()` calls, so encoding chunks one after another produces output
+    bit-for-bit identical to a single `conv_encode()` call on the
+    concatenation of those same chunks -- with peak memory bounded by the
+    chunk size instead of the whole bitstream.
+    """
+
+    def __init__(self, invert_g2: bool = True, rate: str = "1/2"):
+        if rate not in PUNCTURE_PATTERNS:
+            raise ValueError(f"unsupported convolutional code rate {rate!r}")
+        self.rate = rate
+        self.invert_g2 = invert_g2 and rate == "1/2"
+        self._history = np.zeros(K - 1, dtype=np.uint8)
+        self._phase = 0
+
+    def encode(self, bits: np.ndarray) -> np.ndarray:
+        if len(bits) == 0:
+            return np.empty(0, dtype=np.uint8)
+        g1, g2, self._history = _rate_half_encode_from_history(bits, self.invert_g2, self._history)
+        out, self._phase = _puncture(g1, g2, self.rate, self._phase)
         return out
-
-    c1_pattern, c2_pattern = pattern
-    period = len(c1_pattern)
-    n = len(bits)
-    idx = np.arange(n) % period
-    c1_mask = np.array(c1_pattern, dtype=bool)[idx]
-    c2_mask = np.array(c2_pattern, dtype=bool)[idx]
-
-    interleaved = np.empty(2 * n, dtype=np.uint8)
-    interleaved[0::2] = g1
-    interleaved[1::2] = g2
-    keep = np.empty(2 * n, dtype=bool)
-    keep[0::2] = c1_mask
-    keep[1::2] = c2_mask
-    return interleaved[keep]

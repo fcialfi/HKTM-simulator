@@ -42,6 +42,28 @@ def generate_payload(n_cadu: int, frame_bytes: int, source_path: str | None = No
     return data
 
 
+def find_cadu_sync(data: bytes, asm: bytes) -> int:
+    """Return the byte offset of the first occurrence of `asm` in `data` --
+    i.e. the first genuine CADU boundary in a real/captured CADU stream.
+
+    Unlike a stream this tool built itself (where CADU 0 always starts at
+    byte 0), a real captured or exported CADU file is not guaranteed to
+    begin exactly on a CADU boundary: it may be preceded by unframed idle
+    line-fill, or simply be an excerpt starting mid-stream. Byte-aligned
+    search for the (byte-aligned, never-coded) ASM is how a real frame
+    synchronizer locates the first frame too.
+
+    Raises ValueError if `asm` does not appear anywhere in `data`.
+    """
+    offset = data.find(asm)
+    if offset < 0:
+        raise ValueError(
+            f"ASM pattern {asm.hex()} not found anywhere in the input data: "
+            "cannot locate a CADU boundary to synchronize to."
+        )
+    return offset
+
+
 def normalize_peak(iq: np.ndarray, peak: float = 0.9) -> np.ndarray:
     """Scale complex samples so the largest |I| or |Q| excursion equals
     `peak` (default 0.9, leaving headroom against clipping on playback)."""

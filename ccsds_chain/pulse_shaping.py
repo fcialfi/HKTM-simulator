@@ -65,3 +65,48 @@ def pulse_shape(
             progress_callback(end / n)
 
     return out
+
+
+class RRCPulseShaper:
+    """Stateful counterpart to `pulse_shape()`, for shaping a single
+    continuous symbol stream a chunk at a time (e.g. batched/streaming
+    export): carries the filter's overlap tail across `shape()` calls, the
+    same way `pulse_shape()`'s internal chunk loop does, but usable across
+    separate top-level calls. `shape()` on a sequence of chunks followed by
+    one final `flush()` produces output bit-for-bit identical to a single
+    `pulse_shape()` call on the concatenation of those chunks -- with peak
+    memory bounded by the chunk size instead of the whole symbol stream.
+    """
+
+    def __init__(self, sps: int, taps: np.ndarray):
+        self.sps = sps
+        self.taps = taps
+        self._tail = np.zeros(len(taps) - 1, dtype=complex)
+
+    def shape(self, symbols: np.ndarray) -> np.ndarray:
+        """Returns this chunk's `len(symbols) * sps` finalized output
+        samples (any contribution still reachable by a future chunk is
+        held back internally, to be combined with that chunk instead)."""
+        if len(symbols) == 0:
+            return np.zeros(0, dtype=complex)
+        upsampled = np.zeros(len(symbols) * self.sps, dtype=complex)
+        upsampled[::self.sps] = symbols
+        conv = np.convolve(upsampled, self.taps, mode="full")  # len = n_out + len(_tail)
+        n_out = len(symbols) * self.sps
+        # Add the incoming tail (which may itself already carry contributions
+        # forwarded from earlier chunks) before splitting off the new tail,
+        # so a chunk shorter than the filter's tail still accumulates
+        # correctly across more than one prior chunk.
+        conv[:len(self._tail)] += self._tail
+        out = conv[:n_out].copy()
+        self._tail = conv[n_out:].copy()
+        return out
+
+    def flush(self) -> np.ndarray:
+        """Call once after the last `shape()` call to get the filter's
+        remaining tail (group-delay decay) -- matches the extra
+        `len(taps) - 1` samples a single non-streaming `pulse_shape()` call
+        appends at the end."""
+        out = self._tail
+        self._tail = np.zeros(len(self.taps) - 1, dtype=complex)
+        return out
