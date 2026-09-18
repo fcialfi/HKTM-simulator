@@ -85,27 +85,23 @@ class _PayloadPrep:
     sync_skipped_bytes: int
     asm_bits: np.ndarray
     pn: Optional[np.ndarray]
-    # Set only for CADU input from a real source with at least two ASMs
-    # found: CADUs are delimited directly by consecutive ASM positions in
-    # `raw_synced` (`cadu_positions[i]` to `cadu_positions[i+1]`), so their
-    # length can vary from one CADU to the next -- confirmed against a real
-    # captured pass. None when there's only one real CADU to work with (no
-    # second ASM found), in which case the single CADU falls back to
-    # `unit_bytes` (the configured RS/interleave length, best effort).
+    # Set only for CADU input from a real source: the byte offset of every
+    # real ASM found in `raw_synced` that has at least `unit_bytes` bytes
+    # remaining after it (CADU i is always exactly `raw_synced[cadu_
+    # positions[i] : cadu_positions[i] + unit_bytes]` -- the configured
+    # RS-E/interleave-depth length, never measured from ASM spacing: a real
+    # capture wraps each CADU in instrument-specific framing (e.g. a fixed
+    # header + CADU + postamble per record) that is not part of the CADU
+    # and must never be fed into convolutional coding as if it were. The
+    # ASM is only used to find where each CADU *starts* -- see
+    # `_prepare_payload()`.
     cadu_positions: Optional[list] = None
     raw_synced: Optional[bytes] = None
-    # The measured length is no longer a single global constant once CADUs
-    # can vary in length -- these describe that variability for meta/UI
-    # reporting. `detected_unit_bytes` is the first CADU's measured length
-    # (kept for backward-compatible simple display); vs.
-    # `configured_unit_bytes`, what the configured RS-E/interleave-depth
-    # predicted. They differ whenever the real CADUs weren't built with
-    # this tool's exact RS(255,*) interleaved framing.
-    detected_unit_bytes: Optional[int] = None
-    configured_unit_bytes: Optional[int] = None
-    cadu_length_varies: bool = False
-    cadu_length_min_bytes: Optional[int] = None
-    cadu_length_max_bytes: Optional[int] = None
+    # Byte span between the end of one CADU and the start of the next real
+    # ASM (i.e. whatever per-record framing the source wraps CADUs in),
+    # for meta/UI reporting only -- not used by any encoding logic.
+    cadu_wrapper_min_bytes: Optional[int] = None
+    cadu_wrapper_max_bytes: Optional[int] = None
 
 
 def _validate_chain_params(p: ChainParams) -> None:
@@ -156,22 +152,24 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
     previously generated CADUs, not raw Transfer Frames. In that case RS
     encoding, the pseudo-randomizer and the ASM prepend must all be
     skipped: applying them again would double-encode and prefix a second
-    ASM in front of data that already has one. A real/captured CADU file
-    is also not guaranteed to start exactly on a CADU boundary (leading
-    idle line-fill, or an excerpt starting mid-stream), unlike a stream
-    this tool built itself, so the raw source is searched for the first
-    real ASM before slicing into CADUs. Those CADUs are then delimited
-    directly by consecutive ASM positions in the data (`find_all_cadu_
-    positions()`), not by a single length measured once and trusted for
-    the rest of the stream: a real downlink's CADUs aren't guaranteed to
-    all be the same length -- confirmed against a real captured pass,
-    where 5 consecutive CADUs were 1348 bytes and a 6th was 1344 (most
-    likely because they carry a variable number of packed Transfer
-    Frames/Space Packets, not a fixed-size RS-interleaved codeblock at
-    all) -- and trusting either the configured RS-E/interleave-depth or a
-    single once-measured length for the *byte length* (as opposed to for
-    actually RS-decoding, which CADU input skips entirely) would silently
-    misalign some later CADU whenever the real lengths vary.
+    ASM in front of data that already has one.
+
+    A real/captured CADU file is also not guaranteed to be a bare
+    back-to-back stream of CADUs: a capture instrument commonly wraps each
+    CADU in its own record framing (e.g. RF-Catcher/TestTree's CRT format:
+    a fixed-size header, the CADU, then a short postamble, repeated per
+    record) -- confirmed against a real captured pass, where treating the
+    distance between consecutive ASMs as the CADU length (as an earlier
+    version of this code did) silently folded 69 bytes of that per-record
+    header+postamble into what was fed to the convolutional encoder as if
+    it were coded CADU data. The CADU itself is always exactly `unit_bytes`
+    long -- the length the configured RS-E/interleave-depth predicts, never
+    measured from ASM spacing -- and the ASM is used only to find where
+    each CADU *starts* (also handling leading junk before the first one,
+    and an excerpt starting mid-stream): CADU i is `raw_synced[cadu_
+    positions[i] : cadu_positions[i] + unit_bytes]`, and whatever bytes lie
+    between that and the next real ASM (the instrument's own per-record
+    framing, if any) are simply skipped.
     """
     _validate_chain_params(p)
     frame_bytes, unit_bytes, rs_block_bytes, is_cadu_input = _unit_bytes(p)
@@ -182,11 +180,8 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
     n_synced_cadu = 0
     cadu_positions = None
     raw_synced = None
-    detected_unit_bytes = None
-    configured_unit_bytes = None
-    cadu_length_varies = False
-    cadu_length_min_bytes = None
-    cadu_length_max_bytes = None
+    cadu_wrapper_min_bytes = None
+    cadu_wrapper_max_bytes = None
     if is_cadu_input and has_real_source:
         # Read the raw source in full (not just the n_cadu*unit_bytes we
         # ultimately need) so there's enough of it to search past any
@@ -195,29 +190,27 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
         raw = p.payload_bytes if p.payload_bytes is not None else open(p.payload_source, "rb").read()
         sync_skipped_bytes = find_cadu_sync(raw, p.asm)
         raw_synced = raw[sync_skipped_bytes:]
-        configured_unit_bytes = unit_bytes
 
         positions = find_all_cadu_positions(raw_synced, p.asm)
+        for j in range(len(positions) - 1):
+            gap = positions[j + 1] - positions[j]
+            if gap < unit_bytes:
+                raise ValueError(
+                    f"CADU length from the configured RS error correction E={p.rs_e} and "
+                    f"interleave depth I={p.interleave_depth} is {unit_bytes} bytes, but the "
+                    f"next ASM in the source is only {gap} bytes after this one (byte offset "
+                    f"{sync_skipped_bytes + positions[j]} in the source). Check that they match "
+                    "how these CADUs were actually built."
+                )
         if len(positions) >= 2:
-            # Real CADU boundaries, straight from the data: CADU i is
-            # raw_synced[positions[i]:positions[i+1]]. The last found ASM's
-            # own CADU isn't included (its end isn't known without a
-            # following ASM), matching the existing "never guess, zero-pad
-            # instead" convention for anything beyond what's really there.
-            cadu_positions = positions
-            n_synced_cadu = len(positions) - 1
-            gaps = [positions[j + 1] - positions[j] for j in range(n_synced_cadu)]
-            detected_unit_bytes = gaps[0]
-            cadu_length_varies = len(set(gaps)) > 1
-            cadu_length_min_bytes = min(gaps)
-            cadu_length_max_bytes = max(gaps)
-            unit_bytes = detected_unit_bytes  # representative length: padding fallback, batch sizing
-            rs_block_bytes = unit_bytes - len(p.asm)
-        else:
-            # Only one real ASM in the whole source: there's nothing to
-            # measure a real length from, so fall back to the configured
-            # RS/interleave-derived length for that lone CADU (best effort).
-            n_synced_cadu = 1
+            wrapper_gaps = [positions[j + 1] - (positions[j] + unit_bytes) for j in range(len(positions) - 1)]
+            cadu_wrapper_min_bytes = min(wrapper_gaps)
+            cadu_wrapper_max_bytes = max(wrapper_gaps)
+
+        # Only positions with a full CADU's worth of bytes remaining are
+        # usable -- e.g. the very last ASM in a file that ends mid-CADU.
+        cadu_positions = [pos for pos in positions if pos + unit_bytes <= len(raw_synced)]
+        n_synced_cadu = len(cadu_positions)
 
         payload = b""  # unused in this branch -- _cadu_bits() reads cadu_positions/raw_synced instead
     else:
@@ -231,9 +224,8 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
                          has_real_source=has_real_source, n_synced_cadu=n_synced_cadu,
                          sync_skipped_bytes=sync_skipped_bytes, asm_bits=asm_bits, pn=pn,
                          cadu_positions=cadu_positions, raw_synced=raw_synced,
-                         detected_unit_bytes=detected_unit_bytes, configured_unit_bytes=configured_unit_bytes,
-                         cadu_length_varies=cadu_length_varies, cadu_length_min_bytes=cadu_length_min_bytes,
-                         cadu_length_max_bytes=cadu_length_max_bytes)
+                         cadu_wrapper_min_bytes=cadu_wrapper_min_bytes,
+                         cadu_wrapper_max_bytes=cadu_wrapper_max_bytes)
 
 
 def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
@@ -241,32 +233,18 @@ def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
     input, or straight pass-through + sync validation for a CADU input (see
     `_prepare_payload()`)."""
     if prep.is_cadu_input:
-        if prep.cadu_positions is not None:
-            # Real CADU boundaries straight from the data (see
+        if prep.has_real_source:
+            # Real CADU start straight from the data (see
             # `_prepare_payload()`): always genuinely starts with the ASM
-            # by construction, no separate validation needed.
+            # by construction, no separate validation needed. Always
+            # exactly `unit_bytes` long -- the configured RS/interleave
+            # length -- regardless of whatever per-record framing the
+            # source wraps it in; that framing is simply skipped.
             if i < prep.n_synced_cadu:
-                cadu = prep.raw_synced[prep.cadu_positions[i]:prep.cadu_positions[i + 1]]
+                start = prep.cadu_positions[i]
+                cadu = prep.raw_synced[start:start + prep.unit_bytes]
             else:
                 cadu = bytes(prep.unit_bytes)  # zero-padded tail, beyond what the source actually has
-        elif prep.has_real_source:
-            # Only one real ASM was found in the whole source (see
-            # `_prepare_payload()`): that lone CADU falls back to the
-            # configured RS/interleave length, since there's no second ASM
-            # to measure a real one from.
-            if i < prep.n_synced_cadu:
-                cadu = prep.raw_synced[i * prep.unit_bytes:(i + 1) * prep.unit_bytes]
-                if cadu[:len(p.asm)] != p.asm:
-                    raise ValueError(
-                        f"Lost CADU sync at CADU {i} (byte offset "
-                        f"{prep.sync_skipped_bytes + i * prep.unit_bytes} in the source): "
-                        f"expected ASM {p.asm.hex()}, got {cadu[:len(p.asm)].hex()}. CADU length "
-                        "came from the configured RS error correction E and interleave depth "
-                        "(no second ASM was found in the source to measure the real length "
-                        "from) -- check that they match how this CADU was actually built."
-                    )
-            else:
-                cadu = bytes(prep.unit_bytes)
         else:
             # Pseudo-random test payload (no real source): fixed-stride,
             # exactly as generated.
@@ -293,16 +271,8 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "rrc_span": p.rrc_span,
         "input_format": p.input_format,
         "cadu_sync_skipped_bytes": prep.sync_skipped_bytes if prep.is_cadu_input else None,
-        "cadu_length_detected_bytes": prep.detected_unit_bytes,
-        "cadu_length_configured_bytes": prep.configured_unit_bytes,
-        "cadu_length_mismatch": (
-            prep.detected_unit_bytes is not None
-            and prep.configured_unit_bytes is not None
-            and prep.detected_unit_bytes != prep.configured_unit_bytes
-        ),
-        "cadu_length_varies": prep.cadu_length_varies,
-        "cadu_length_min_bytes": prep.cadu_length_min_bytes,
-        "cadu_length_max_bytes": prep.cadu_length_max_bytes,
+        "cadu_wrapper_bytes_min": prep.cadu_wrapper_min_bytes,
+        "cadu_wrapper_bytes_max": prep.cadu_wrapper_max_bytes,
         "fec_rs": p.fec_rs and not prep.is_cadu_input,
         "fec_conv": p.fec_conv,
         "conv_rate": p.conv_rate,
