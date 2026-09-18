@@ -24,17 +24,41 @@ PUNCTURE_PATTERNS = {
 }
 
 
+_WEIGHTS = (1 << np.arange(K)).astype(np.uint8)  # column c (oldest..newest) -> bit c
+
+# Chunk size for _base_rate_half_encode: each chunk briefly materializes a
+# (chunk_size, K) array, so this bounds peak memory independently of the
+# total bitstream length (a multi-million-CADU export would otherwise blow
+# up the single sliding_window_view() below to tens of GB, see #12).
+_CHUNK_BITS = 2_000_000
+
+
 def _base_rate_half_encode(bits: np.ndarray, invert_g2: bool) -> tuple:
-    """Returns (g1, g2) arrays, one output bit per input bit."""
+    """Returns (g1, g2) arrays, one output bit per input bit.
+
+    Processed in fixed-size chunks, carrying the last K-1 bits of each
+    chunk as the shift-register state for the next one, so the encoder
+    stays a single continuous register across the whole bitstream (as if
+    unchunked) while peak memory stays bounded regardless of len(bits).
+    """
     bits = np.asarray(bits, dtype=np.uint8)
-    padded = np.concatenate([np.zeros(K - 1, dtype=np.uint8), bits])
-    windows = np.lib.stride_tricks.sliding_window_view(padded, K)  # oldest..newest per row
+    n = len(bits)
+    g1 = np.empty(n, dtype=np.uint8)
+    g2 = np.empty(n, dtype=np.uint8)
 
-    weights = (1 << np.arange(K)).astype(np.uint32)  # column c (oldest..newest) -> bit c
-    full = (windows.astype(np.uint32) * weights).sum(axis=1)
+    history = np.zeros(K - 1, dtype=np.uint8)
+    for start in range(0, n, _CHUNK_BITS):
+        end = min(start + _CHUNK_BITS, n)
+        chunk = bits[start:end]
+        padded = np.concatenate([history, chunk])
+        windows = np.lib.stride_tricks.sliding_window_view(padded, K)  # oldest..newest per row
 
-    g1 = _PARITY_LUT[full & G1]
-    g2 = _PARITY_LUT[full & G2]
+        full = (windows * _WEIGHTS).sum(axis=1, dtype=np.uint8)
+
+        g1[start:end] = _PARITY_LUT[full & G1]
+        g2[start:end] = _PARITY_LUT[full & G2]
+        history = padded[-(K - 1):]
+
     if invert_g2:
         g2 = 1 - g2
     return g1, g2
