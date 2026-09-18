@@ -176,10 +176,16 @@ def main():
     skipped = export_result["meta"].get("cadu_sync_skipped_bytes")
     if skipped:
         print(f"       -> synced to first CADU boundary, skipped {skipped} leading byte(s) of unframed data")
-    if export_result["meta"].get("cadu_length_mismatch"):
+    if export_result["meta"].get("cadu_length_varies"):
+        print(f"       -> CADU length varies in this source: {export_result['meta']['cadu_length_min_bytes']}-"
+              f"{export_result['meta']['cadu_length_max_bytes']} bytes -- delimited by ASM, not a fixed length")
+    elif export_result["meta"].get("cadu_length_mismatch"):
         print(f"       -> CADU length measured from the data: {export_result['meta']['cadu_length_detected_bytes']} "
               f"bytes (not {export_result['meta']['cadu_length_configured_bytes']}) -- using the measured length")
-    print(f"       -> {params.n_cadu} CADU x {export_result['cadu_bytes']} byte")
+    if export_result["meta"].get("cadu_length_varies"):
+        print(f"       -> {params.n_cadu} CADU")
+    else:
+        print(f"       -> {params.n_cadu} CADU x {export_result['cadu_bytes']} byte")
 
     meta_path = output_path.rsplit(".", 1)[0] + ".meta.json"
     with open(meta_path, "w") as f:
