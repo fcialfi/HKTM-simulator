@@ -585,13 +585,20 @@ with panel:
     )
     if generate_clicked:
         export_params = dataclasses.replace(params, n_cadu=int(export_n_cadu))
-        with st.spinner(f"Generating {export_n_cadu} CADUs..."):
-            export_result = run_chain(export_params)
-            iq = normalize_peak(export_result.iq, output_peak)
-            output_fs = export_result.sample_rate
-            if resample_enabled and target_fs != export_result.sample_rate:
-                iq = resample_iq(iq, export_result.sample_rate, target_fs)
-                output_fs = target_fs
+        progress_bar = st.progress(0, text=f"Generating {export_n_cadu:,} CADUs...".replace(",", " "))
+
+        def _update_progress(frac: float, message: str) -> None:
+            progress_bar.progress(min(max(frac, 0.0), 1.0), text=message)
+
+        export_result = run_chain(export_params, progress_callback=_update_progress)
+        iq = normalize_peak(export_result.iq, output_peak)
+        output_fs = export_result.sample_rate
+        if resample_enabled and target_fs != export_result.sample_rate:
+            progress_bar.progress(1.0, text="Resampling...")
+            iq = resample_iq(iq, export_result.sample_rate, target_fs)
+            output_fs = target_fs
+        progress_bar.empty()
+        with st.spinner("Packing output file..."):
             meta = dict(export_result.meta)
             meta.update({
                 "format": "raw interleaved, no header (I0,Q0,I1,Q1,...)",

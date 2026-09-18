@@ -2,6 +2,7 @@
 the GUI (app.py) so the two never drift apart."""
 
 from dataclasses import dataclass, field
+from typing import Callable, Optional
 import time
 
 import numpy as np
@@ -55,7 +56,24 @@ class ChainResult:
     meta: dict = field(default_factory=dict)
 
 
-def run_chain(p: ChainParams) -> ChainResult:
+# Rough, fixed weights for run_chain()'s progress_callback, from benchmarking
+# a representative run: the pure-Python per-CADU RS/ASM loop and the RRC
+# pulse shaping dominate the runtime, so those two get fine-grained
+# incremental progress; convolutional encoding + QPSK mapping are fast
+# enough (vectorized numpy) to just report as a single jump between them.
+_PROGRESS_RS_ASM_WEIGHT = 0.55
+_PROGRESS_CONV_MAP_WEIGHT = 0.12
+_PROGRESS_PULSE_WEIGHT = 1.0 - _PROGRESS_RS_ASM_WEIGHT - _PROGRESS_CONV_MAP_WEIGHT
+
+
+def run_chain(
+    p: ChainParams,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+) -> ChainResult:
+    """Run the full chain. `progress_callback(fraction, message)`, if given,
+    is called periodically with fraction in [0, 1] -- useful for a UI
+    progress bar on a large (e.g. whole-file) export; it is not called at
+    all for a cheap/small run, so callers can pass it unconditionally."""
     if p.modulation != "QPSK":
         raise NotImplementedError(f"modulation {p.modulation!r} not implemented (baseline: QPSK)")
     if p.encoding != "NRZ-L":
@@ -82,6 +100,10 @@ def run_chain(p: ChainParams) -> ChainResult:
     asm_bits = bytes_to_bits(p.asm)
     rs_block_bytes = p.rs_n * p.interleave_depth if p.fec_rs else frame_bytes
     pn = pn_sequence(rs_block_bytes * 8, p.randomizer) if p.randomizer != "none" else None
+    # Throttled so a large n_cadu doesn't spend more time updating a UI
+    # widget than actually encoding (a plain Streamlit progress bar update
+    # is not free at tens/hundreds of thousands of calls).
+    report_every = max(1, p.n_cadu // 200)
     cadu_bit_chunks = []
     for i in range(p.n_cadu):
         frame = payload[i * frame_bytes:(i + 1) * frame_bytes]
@@ -92,6 +114,11 @@ def run_chain(p: ChainParams) -> ChainResult:
             rs_bits = np.bitwise_xor(rs_bits, pn)
         cadu_bit_chunks.append(asm_bits)
         cadu_bit_chunks.append(rs_bits)
+        if progress_callback is not None and ((i + 1) % report_every == 0 or i + 1 == p.n_cadu):
+            progress_callback(
+                _PROGRESS_RS_ASM_WEIGHT * (i + 1) / p.n_cadu,
+                f"Encoding CADU {i + 1:,}/{p.n_cadu:,}...".replace(",", " "),
+            )
     cadu_bytes = len(p.asm) + rs_block_bytes
 
     bits = np.concatenate(cadu_bit_chunks)
@@ -104,8 +131,21 @@ def run_chain(p: ChainParams) -> ChainResult:
     bipolar = bits_to_nrzl(coded_bits)
     symbols = qpsk_gray_map(bipolar)
 
+    if progress_callback is not None:
+        progress_callback(_PROGRESS_RS_ASM_WEIGHT + _PROGRESS_CONV_MAP_WEIGHT, "Pulse shaping (RRC filter)...")
+
     taps = rrc_taps(p.rrc_alpha, p.rrc_span, p.sps)
-    iq = pulse_shape(symbols, p.sps, taps)
+    pulse_progress = (
+        (lambda frac: progress_callback(
+            _PROGRESS_RS_ASM_WEIGHT + _PROGRESS_CONV_MAP_WEIGHT + _PROGRESS_PULSE_WEIGHT * frac,
+            "Pulse shaping (RRC filter)...",
+        ))
+        if progress_callback is not None else None
+    )
+    iq = pulse_shape(symbols, p.sps, taps, progress_callback=pulse_progress)
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Done")
 
     sample_rate = p.symbol_rate * p.sps
     elapsed = time.time() - t0
