@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ccsds_chain.pipeline import ChainParams, run_chain
-from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth, null_to_null_bandwidth
+from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import normalize_peak, resample_iq, pack_iq_interleaved, resample_ratio
 
 BITS_PER_SYMBOL = {"QPSK": 2}
@@ -349,32 +349,18 @@ with panel:
     peak = np.max(psd)
     db = 10 * np.log10(psd / peak)
 
-    bw_3db = contiguous_bandwidth(freqs, db, -3.0)
-    bw_null = null_to_null_bandwidth(freqs, db)
     bw_theoretical = params.symbol_rate * (1 + params.rrc_alpha)
 
     # --------------------------------------------------------------------------
-    # Metric cards: the 3 bandwidth readings that matter for RF-Catcher stand
-    # out as hero tiles; everything else is a compact diagnostic strip below.
+    # Metric card: the theoretical occupied bandwidth is what RF-Catcher cares
+    # about, shown as a single hero tile.
     # --------------------------------------------------------------------------
     hero_metrics = [
-        ("-3dB Bandwidth", f"{bw_3db/1e6:.3f}", "MHz",
-         "~ symbol rate, almost independent of roll-off",
-         "Width where the measured PSD stays within 3 dB of its peak. For an RRC-shaped "
-         "signal this sits at +/-Rs/2 almost regardless of roll-off, so it tracks the "
-         "symbol rate rather than the roll-off."),
-        ("Null-to-Null Bandwidth", f"{bw_null/1e6:.3f}", "MHz",
-         "measured directly on the spectrum's nulls",
-         "Width of the main lobe between its first null on each side, found directly on "
-         "the measured PSD. For an RRC-shaped signal this null sits exactly at "
-         "+/-symbol_rate*(1+alpha)/2, so it tracks the 'Occupied BW (theoretical)' metric "
-         "to the right -- unlike the -3dB point, which barely moves with roll-off."),
         ("Occupied BW (theoretical)", f"{bw_theoretical/1e6:.3f}", "MHz",
          "Rs x (1 + alpha), the reference for RF-Catcher",
-         "Theoretical RRC spectral edge = symbol rate x (1 + alpha). Not a live "
-         "measurement -- compare it against the measured null-to-null bandwidth above."),
+         "Theoretical RRC spectral edge = symbol rate x (1 + alpha)."),
     ]
-    hero_cols = st.columns(3)
+    hero_cols = st.columns(1)
     for col, (label, value, unit, sub, tooltip) in zip(hero_cols, hero_metrics):
         col.markdown(f"""
         <div class="metric-hero" title="{tooltip}">
@@ -409,12 +395,9 @@ with panel:
             line=dict(color="#00d4ff", width=1.6),
             fill="tozeroy", fillcolor="rgba(0,212,255,0.12)",
         ))
-        fig.add_hline(y=-3, line=dict(color="#ffb454", width=1, dash="dash"),
-                      annotation_text="-3 dB", annotation_position="top left",
-                      annotation_font_color="#ffb454")
-        fig.add_vline(x=-bw_null / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"))
-        fig.add_vline(x=bw_null / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"),
-                      annotation_text="null", annotation_position="top right",
+        fig.add_vline(x=-bw_theoretical / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"))
+        fig.add_vline(x=bw_theoretical / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"),
+                      annotation_text="theoretical edge", annotation_position="top right",
                       annotation_font_color="#ff5c7a")
         fig.update_layout(
             title="Spectrum (PSD) -- real-time",
@@ -427,9 +410,8 @@ with panel:
         )
         st.plotly_chart(fig, width='stretch')
         st.caption(
-            "Note: the -3dB bandwidth (dashed orange) stays close to the symbol rate for "
-            "any roll-off -- it's the measured nulls (dashed red) and the 'Occupied BW "
-            "(theoretical)' metric above that grow with alpha."
+            "Note: the dashed red lines mark the theoretical occupied bandwidth edge "
+            "(+/- symbol_rate x (1 + alpha) / 2), matching the metric above."
         )
 
     with side_col:
