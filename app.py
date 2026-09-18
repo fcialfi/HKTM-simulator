@@ -687,7 +687,19 @@ with panel:
     export_native_samples = export_n_cadu * symbols_per_cadu * params.sps
     export_samples = export_native_samples * (export_output_fs / native_fs)
     export_mb = export_samples * 2 * export_bytes_per_sample / 1e6
-    size_warning = " -- large: generating this may take a while and use significant RAM" if export_mb > 500 else ""
+    # export_chain() generates in bounded-memory batches (~64 MB) regardless
+    # of file size, so a large export only costs time/disk, not RAM -- the
+    # one exception is resampling, which is not streamed (see export_chain()'s
+    # docstring) and needs the whole native-rate signal in memory at once.
+    if export_mb > 500:
+        size_warning = (
+            " -- large: generating this may take a while, and needs the whole native-rate "
+            "signal in memory at once for resampling (refused upfront if it wouldn't fit)"
+            if resample_enabled else
+            " -- large: generating this may take a while (memory use stays bounded regardless of file size)"
+        )
+    else:
+        size_warning = ""
     st.caption(f"~{export_duration_s:.2f} s of signal, ~{export_mb:,.0f} MB file{size_warning}")
 
     generate_clicked = st.button("Generate export file", width='stretch')
