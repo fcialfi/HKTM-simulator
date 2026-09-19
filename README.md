@@ -22,6 +22,8 @@ ccsds_chain/
   spectrum.py              PSD/occupied bandwidth (used by app.py and verify_spectrum.py)
   utils.py                 bit/byte helpers, IQ file I/O
   presets.py               named scenario presets (used by app.py and generate_signal.py)
+  viterbi.py               Viterbi decoder for the K=7 convolutional code (self-verification)
+  loopback.py              full digital-domain encode/decode loopback (self-verification)
 ```
 
 ## Baseline parameters
@@ -236,6 +238,29 @@ rather than hardcoded external test vectors, so a refactor that silently
 breaks one of those properties fails CI instead of only showing up as a
 subtly wrong spectrum. Runs in a few seconds; also run automatically on
 every push/PR (`.github/workflows/tests.yml`).
+
+### Self-verification decoder (loopback)
+
+`ccsds_chain/viterbi.py` (Viterbi decoder for the K=7 convolutional code)
+and `ccsds_chain/reed_solomon.py`'s `rs_decode_codeword`/
+`rs_decode_interleaved` (Berlekamp-Massey/Chien-search/Forney) close the
+loop on the two parts of the chain hand-derived from the CCSDS spec: given
+what this project's own encoder produced -- including corrupted, so an
+actual *correction* has to happen, not just a pass-through -- can this
+project's own decoder recover the exact original data?
+`ccsds_chain/loopback.py` ties both together (RS decode + ASM check +
+descramble + Viterbi decode) into a single `decode_transfer_frame_stream()`
+call, exercised end-to-end by `tests/test_loopback.py`.
+
+This is scoped to the digital/bit domain only, not the actual generated IQ
+waveform -- recovering symbols from real IQ needs a matched filter and
+symbol-timing recovery, a separate, larger piece of receiver DSP this
+project doesn't implement (it's a signal *generator*, per the top of this
+file). What it validates instead is the part of the chain most likely to
+hide a subtle spec-transcription bug: encoding alone can produce a
+codeword divisible by the right roots (algebraically well-formed) without
+ever proving that a *real* error in it is actually correctable, which only
+running the decoder for real, against real injected errors, can show.
 
 ## Limitations
 

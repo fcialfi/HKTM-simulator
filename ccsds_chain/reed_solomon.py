@@ -59,6 +59,14 @@ def gf_mul(a: int, b: int) -> int:
     return _EXP[_LOG[a] + _LOG[b]]
 
 
+def gf_inv(a: int) -> int:
+    """Multiplicative inverse in GF(256). a=0 has none (ZeroDivisionError,
+    matching Python's own convention for a genuine division by zero)."""
+    if a == 0:
+        raise ZeroDivisionError("0 has no multiplicative inverse in GF(256)")
+    return _EXP[(255 - _LOG[a]) % 255]
+
+
 # Full multiplication table, built once: _GF_MUL_TABLE[a][b] = gf_mul(a, b).
 # Lets the RS division inner loop (multiply one coefficient by every
 # generator-polynomial coefficient at once) be a single vectorized numpy
@@ -188,4 +196,184 @@ def rs_encode_interleaved(data: bytes, k: int, n: int, depth: int) -> bytes:
     out = bytearray(n * depth)
     for j, codeword in enumerate(codewords):
         out[j::depth] = codeword
+    return bytes(out)
+
+
+# --------------------------------------------------------------------------
+# Decoding (self-verification loopback: confirms rs_encode_* is actually
+# correctable, not just "produces a codeword divisible by the right roots").
+#
+# The code's roots are alpha^(11j) for j=128-E..127+E (4.3.4) -- 2E
+# *consecutive powers of beta = alpha^11* (not of alpha itself), at offset
+# b=128-E rather than the narrow-sense b=0 a textbook RS decoder assumes.
+# Since gcd(11, 255) = 1, beta is itself a primitive element, so standard
+# syndrome/Berlekamp-Massey/Chien-search/Forney decoding applies unchanged
+# once syndromes are computed against powers of beta -- *except* Forney's
+# formula naturally recovers Y_l = e_l * X_l^b (the error value scaled by
+# the root offset), not the true error magnitude e_l, when b != 0. This
+# module corrects for that explicitly (see rs_decode_codeword's comments)
+# rather than assuming a narrow-sense (b=0) decoder formula would work as-is
+# -- silently getting this wrong would produce a decoder that "works" on the
+# zero-error case (a fast path that bypasses all of this) while corrupting
+# any codeword it actually has to correct, which is exactly the kind of bug
+# extensive property-based round-trip testing (tests/test_reed_solomon.py)
+# with real random error patterns, not just zero-error smoke tests, is
+# meant to catch.
+# --------------------------------------------------------------------------
+
+
+def _poly_eval_gf(coeffs_desc, x: int) -> int:
+    """Evaluate a GF(256) polynomial (coefficients highest-degree first) at
+    `x`, via Horner's method. Same convention rs_encode_codeword's codeword
+    layout uses: array index 0 is the highest-degree coefficient."""
+    result = 0
+    for c in coeffs_desc:
+        result = gf_mul(result, x) ^ int(c)
+    return result
+
+
+def _berlekamp_massey(syndromes: list) -> list:
+    """Berlekamp-Massey over GF(256): finds the error-locator polynomial
+    sigma(x) (ascending degree, sigma[0]=1) of minimal degree satisfying the
+    syndromes' linear recurrence. Returns sigma's coefficients, ascending
+    degree, length = degree+1."""
+    two_e = len(syndromes)
+    C = [1] + [0] * two_e
+    B = [1] + [0] * two_e
+    L = 0
+    m = 1
+    b = 1
+    for n_ in range(two_e):
+        delta = syndromes[n_]
+        for i in range(1, L + 1):
+            delta ^= gf_mul(C[i], syndromes[n_ - i])
+        if delta == 0:
+            m += 1
+        elif 2 * L <= n_:
+            T = C.copy()
+            coef = gf_mul(delta, gf_inv(b))
+            for i in range(len(B)):
+                if i + m < len(C):
+                    C[i + m] ^= gf_mul(coef, B[i])
+            L = n_ + 1 - L
+            B = T
+            b = delta
+            m = 1
+        else:
+            coef = gf_mul(delta, gf_inv(b))
+            for i in range(len(B)):
+                if i + m < len(C):
+                    C[i + m] ^= gf_mul(coef, B[i])
+            m += 1
+    return C[:L + 1]
+
+
+def rs_decode_codeword(codeword: bytes, e: int) -> bytes:
+    """Systematic RS decode/correct of one codeword (n = len(codeword)
+    symbols, in the polynomial-in-alpha/"conventional" basis, same as
+    rs_encode_codeword's own input/output convention): returns the
+    corrected k = n-2E message symbols. Raises ValueError if the received
+    codeword carries more errors than this code can correct (E symbols).
+    """
+    n = len(codeword)
+    k = n - 2 * e
+    if e not in _GEN_POLY:
+        raise ValueError(f"unsupported error-correction capability E={e} (must be 8 or 16)")
+    if k < 0:
+        raise ValueError(f"codeword too short ({n} bytes) for E={e} (need at least {2 * e})")
+
+    received = list(codeword)  # descending degree: index i is coeff of x^(n-1-i)
+    b = 128 - e  # first consecutive root is beta^b = alpha^(11*b) (4.3.4)
+
+    syndromes = [_poly_eval_gf(received, _EXP[(11 * (b + j)) % 255]) for j in range(2 * e)]
+    if not any(syndromes):
+        return bytes(received[:k])  # already a valid codeword, no correction needed
+
+    sigma = _berlekamp_massey(syndromes)
+    L = len(sigma) - 1
+    if L > e or L == 0:
+        raise ValueError(f"uncorrectable codeword: error-locator degree {L} exceeds E={e}")
+
+    # Chien search: candidate error positions l=0..n-1 are in *degree*
+    # terms (array index i = n-1-l); l is a root of sigma iff
+    # sigma(X_l^-1) = 0, X_l = beta^l = alpha^(11*l).
+    error_positions = []
+    for l in range(n):
+        x_inv = _EXP[(-11 * l) % 255]
+        if _poly_eval_gf(list(reversed(sigma)), x_inv) == 0:
+            error_positions.append(l)
+    if len(error_positions) != L:
+        raise ValueError(
+            f"uncorrectable codeword: Chien search found {len(error_positions)} root(s), expected {L}"
+        )
+
+    # Forney: Omega(x) = S(x)*sigma(x) mod x^(2E) (S(x), sigma(x) ascending
+    # degree); sigma'(x) is sigma's formal derivative (char 2: only odd-
+    # degree terms survive, at one lower degree).
+    s_poly = syndromes  # already ascending degree (index j = S_j)
+    omega_full = [0] * (len(s_poly) + len(sigma) - 1)
+    for i, si in enumerate(s_poly):
+        if si == 0:
+            continue
+        for jc, cj in enumerate(sigma):
+            if cj:
+                omega_full[i + jc] ^= gf_mul(si, cj)
+    omega = omega_full[:2 * e]
+    # sigma'(x) in char 2: term c_i*x^i survives only for odd i (else i*c_i=0),
+    # landing at the *even* degree i-1 -- so this must stay a degree-indexed
+    # array with the (zero) even-i/odd-degree gaps kept, not a compacted list
+    # of just the nonzero coefficients (which would silently shift every
+    # term after the first onto the wrong degree).
+    sigma_deriv = [0] * max(len(sigma) - 1, 1)
+    for i in range(1, len(sigma), 2):
+        sigma_deriv[i - 1] = sigma[i]
+
+    corrected = received.copy()
+    for l in error_positions:
+        x = _EXP[(11 * l) % 255]
+        x_inv = _EXP[(-11 * l) % 255]
+        omega_val = _poly_eval_gf(list(reversed(omega)), x_inv) if omega else 0
+        deriv_val = _poly_eval_gf(list(reversed(sigma_deriv)), x_inv) if sigma_deriv else 0
+        if deriv_val == 0:
+            raise ValueError("uncorrectable codeword: Forney's formula degenerate (sigma'(X^-1) = 0)")
+        y_l = gf_mul(x, gf_mul(omega_val, gf_inv(deriv_val)))
+        # Y_l = e_l * X_l^b (the code's roots start at beta^b, not beta^0):
+        # recover the true error magnitude by dividing back out X_l^b.
+        e_l = gf_mul(y_l, _EXP[(-11 * l * b) % 255])
+        array_index = n - 1 - l
+        corrected[array_index] ^= e_l
+
+    # A miscorrection (error pattern beyond E symbols that happened to look
+    # like a valid <=E-error pattern) is only detectable by re-checking the
+    # syndromes of the "corrected" result -- do that rather than trust the
+    # algebra blindly.
+    if any(_poly_eval_gf(corrected, _EXP[(11 * (b + j)) % 255]) for j in range(2 * e)):
+        raise ValueError("uncorrectable codeword: correction did not resolve all syndromes")
+
+    return bytes(corrected[:k])
+
+
+def rs_decode_interleaved(data: bytes, k: int, n: int, depth: int) -> bytes:
+    """Inverse of rs_encode_interleaved(): de-interleaves `data` (must be
+    exactly n*depth bytes, dual-basis, same layout rs_encode_interleaved
+    produces) into `depth` RS(n,k) codewords, corrects each, and returns the
+    k*depth message bytes (dual basis, unaltered from the codeword's own
+    data zone -- same transformational-equivalence convention
+    rs_encode_interleaved documents). Raises ValueError if any codeword is
+    uncorrectable.
+    """
+    if len(data) != n * depth:
+        raise ValueError(f"expected {n * depth} bytes, got {len(data)}")
+    e = (n - k) // 2
+
+    messages = []
+    for j in range(depth):
+        codeword_dual = data[j::depth]
+        codeword_conventional = bytes(from_dual_basis(b) for b in codeword_dual)
+        message_conventional = rs_decode_codeword(codeword_conventional, e)
+        messages.append(bytes(to_dual_basis(b) for b in message_conventional))
+
+    out = bytearray(k * depth)
+    for j, message in enumerate(messages):
+        out[j::depth] = message
     return bytes(out)

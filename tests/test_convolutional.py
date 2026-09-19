@@ -1,5 +1,6 @@
 """Regression tests for the CCSDS K=7 convolutional encoder and puncturing."""
 
+import zlib
 from fractions import Fraction
 
 import numpy as np
@@ -86,7 +87,13 @@ class TestConvEncoderStatefulEquivalence:
         [1000],
     ])
     def test_chunked_matches_single_call(self, rate, chunk_sizes):
-        rng = np.random.default_rng(hash((rate, tuple(chunk_sizes))) % (2**32))
+        # A fixed seed derived from a CRC (not Python's built-in hash(),
+        # which is randomized per interpreter process unless
+        # PYTHONHASHSEED is disabled, and so isn't reproducible across runs)
+        # -- this test's assertion holds for any random content regardless,
+        # but a fixed seed is still the right default for a regression test.
+        seed = zlib.crc32(f"{rate}:{chunk_sizes}".encode()) % (2**32)
+        rng = np.random.default_rng(seed)
         chunks = [rng.integers(0, 2, size=n, dtype=np.uint8) for n in chunk_sizes]
         whole = np.concatenate(chunks) if chunks else np.empty(0, dtype=np.uint8)
 
