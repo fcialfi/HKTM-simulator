@@ -21,6 +21,7 @@ ccsds_chain/
   pulse_shaping.py         RRC filter
   spectrum.py              PSD/occupied bandwidth (used by app.py and verify_spectrum.py)
   utils.py                 bit/byte helpers, IQ file I/O
+  presets.py               named scenario presets (used by app.py and generate_signal.py)
 ```
 
 ## Baseline parameters
@@ -202,6 +203,22 @@ most common options are also exposed via the CLI (`--help`), including
 output format ones (`--dtype`, `--peak`, `--target-fs`). If `-o`/`--output`
 is not given, the file is saved to `output/` as
 `qpsk_ccsds_<fs>Msps_<n_cadu>cadu_<timestamp>.iq`.
+
+### Scenario presets
+
+`ccsds_chain/presets.py` names a few common encoding-parameter combinations
+(`baseline`, `high_throughput`, `robust_bpsk`, `legacy_compat` -- see the
+file for exactly what each one sets and why), shared between the CLI and
+the GUI so they can't drift apart:
+
+```bash
+python generate_signal.py --preset robust_bpsk -o test.raw   # any flag given
+python generate_signal.py --preset robust_bpsk --alpha 0.35  # explicitly still overrides the preset
+```
+
+In the GUI, pick one from the "Scenario preset" selector at the top of the
+sidebar -- it just fills in the encoding parameters below as a starting
+point, so you can still tweak any of them afterward.
 
 ### Tests
 
