@@ -133,7 +133,7 @@ class TestSystematicEncoding:
 class TestInterleaving:
     @pytest.mark.parametrize("depth", [1, 2, 3, 4, 5, 8])
     def test_interleaved_output_size(self, depth):
-        k, n, e = 223, 255, 16
+        k, n = 223, 255
         data = bytes((i * 7) % 256 for i in range(k * depth))
         out = rs_encode_interleaved(data, k, n, depth)
         assert len(out) == n * depth
