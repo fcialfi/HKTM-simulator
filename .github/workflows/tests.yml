@@ -1,0 +1,36 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Check CLI scripts and package still import
+        run: |
+          python -c "import ccsds_chain.pipeline, ccsds_chain.reed_solomon, ccsds_chain.convolutional"
+          python -c "import ast; ast.parse(open('app.py').read())"
+          python generate_signal.py --n-cadu 2 -o /tmp/ci_smoke.iq
+          python verify_spectrum.py /tmp/ci_smoke.iq
