@@ -42,7 +42,7 @@ def main():
 
     with open(args.iq_file, "rb") as f:
         iq = unpack_iq_interleaved(f.read(), dtype)
-    print(f"File: {args.iq_file}  ({len(iq)} campioni IQ @ {fs / 1e6:.3f} MS/s, formato {dtype})")
+    print(f"File: {args.iq_file}  ({len(iq)} IQ samples @ {fs / 1e6:.3f} MS/s, format {dtype})")
 
     psd = welch_psd(iq, args.nperseg)
     freqs = np.fft.fftshift(np.fft.fftfreq(args.nperseg, d=1 / fs))
@@ -55,12 +55,12 @@ def main():
 
     symbol_rate = meta.get("symbol_rate")
     alpha = meta.get("rrc_alpha")
-    print(f"Banda occupata -3dB:      {bw_3db / 1e6:.4f} MHz")
-    print(f"Banda null-nullo:         {bw_null / 1e6:.4f} MHz")
+    print(f"Occupied bandwidth -3dB:  {bw_3db / 1e6:.4f} MHz")
+    print(f"Null-to-null bandwidth:   {bw_null / 1e6:.4f} MHz")
     if symbol_rate and alpha is not None:
-        print(f"Attese (Rs={symbol_rate / 1e6:.3f} MHz, alpha={alpha}): "
+        print(f"Expected (Rs={symbol_rate / 1e6:.3f} MHz, alpha={alpha}): "
               f"~{symbol_rate / 1e6:.2f}-{symbol_rate * 1.05 / 1e6:.2f} MHz (-3dB), "
-              f"~{symbol_rate * (1 + alpha) / 1e6:.2f} MHz (null-nullo, teorico Rs*(1+alpha))")
+              f"~{symbol_rate * (1 + alpha) / 1e6:.2f} MHz (null-to-null, theoretical Rs*(1+alpha))")
 
     if args.plot:
         plt.figure(figsize=(9, 5))
@@ -68,14 +68,14 @@ def main():
         plt.axhline(-3, color="orange", linestyle="--", linewidth=0.8, label="-3 dB")
         plt.axvline(-bw_null / 2e6, color="red", linestyle="--", linewidth=0.8, label="null")
         plt.axvline(bw_null / 2e6, color="red", linestyle="--", linewidth=0.8)
-        plt.xlabel("Frequenza (MHz)")
-        plt.ylabel("PSD relativa (dB)")
-        plt.title(f"Spettro segnale generato ({os.path.basename(args.iq_file)})")
+        plt.xlabel("Frequency (MHz)")
+        plt.ylabel("Relative PSD (dB)")
+        plt.title(f"Generated signal spectrum ({os.path.basename(args.iq_file)})")
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
         plt.savefig(args.plot, dpi=150)
-        print(f"Grafico salvato: {args.plot}")
+        print(f"Plot saved: {args.plot}")
 
 
 if __name__ == "__main__":
