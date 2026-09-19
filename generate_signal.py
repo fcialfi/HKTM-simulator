@@ -29,7 +29,7 @@ from ccsds_chain.pipeline import ChainParams, export_chain
 from ccsds_chain.utils import resample_ratio
 
 # --------------------------------------------------------------------------
-# CONFIGURABLE PARAMETERS (ref. AWS-OSE-ICD-0063, baseline CCSDS 131.0-B-2)
+# CONFIGURABLE PARAMETERS (ref. AWS-OSE-ICD-0063, baseline CCSDS 131.0-B-5)
 # --------------------------------------------------------------------------
 MODULATION = "QPSK"            # selectable: "QPSK" (baseline, 2 bits/symbol) or "BPSK" (1 bit/symbol)
 ENCODING = "NRZ-L"             # selectable: only NRZ-L implemented (baseline)
