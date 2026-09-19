@@ -3,8 +3,7 @@
 Test RF signal generator, modulated per the CCSDS chain (baseline QPSK), to
 be injected via the **RF-Catcher (TestTree) Capture & Playback Application**.
 
-References: AWS-OSE-ICD-0063 (Arctic Weather Satellite downlink),
-CCSDS 131.0-B-5 (TM Synchronization and Channel Coding, Sept. 2023),
+References: CCSDS 131.0-B-5 (TM Synchronization and Channel Coding, Sept. 2023),
 ECSS-E-ST-50-01C.
 
 ## Project structure
