@@ -204,6 +204,23 @@ output format ones (`--dtype`, `--peak`, `--target-fs`). If `-o`/`--output`
 is not given, the file is saved to `output/` as
 `qpsk_ccsds_<fs>Msps_<n_cadu>cadu_<timestamp>.iq`.
 
+### Tests
+
+```bash
+pip install -r requirements.txt pytest
+pytest
+```
+
+`tests/` covers the coding chain's own claimed invariants -- RS codeword
+divisibility by every root required by CCSDS 131.0-B-5 4.3.4, dual-basis
+transform invertibility, PN sequence periodicity, and bit-for-bit
+equivalence between the batched/streaming `export_chain()` path and the
+whole-array `run_chain()` reference for both plain and resampled output --
+rather than hardcoded external test vectors, so a refactor that silently
+breaks one of those properties fails CI instead of only showing up as a
+subtly wrong spectrum. Runs in a few seconds; also run automatically on
+every push/PR (`.github/workflows/tests.yml`).
+
 ## Limitations
 
 - **Turbo coding and LDPC** (sections 6, 7, 8 of the standard) are not
