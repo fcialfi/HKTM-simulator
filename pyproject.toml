@@ -16,6 +16,13 @@ dev = ["pytest>=7"]
 [tool.setuptools]
 packages = ["ccsds_chain"]
 
+[tool.setuptools.package-data]
+# presets.py loads this at runtime relative to itself; without listing it
+# here a non-editable install (`pip install .`, as opposed to the `-e .`
+# this project's own tests/CI use) would silently ship the package without
+# it.
+ccsds_chain = ["presets.json"]
+
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 

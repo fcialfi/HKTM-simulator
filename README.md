@@ -21,7 +21,8 @@ ccsds_chain/
   pulse_shaping.py         RRC filter
   spectrum.py              PSD/occupied bandwidth (used by app.py and verify_spectrum.py)
   utils.py                 bit/byte helpers, IQ file I/O
-  presets.py               named scenario presets (used by app.py and generate_signal.py)
+  presets.py               loads/validates presets.json
+  presets.json             named scenario presets (edit this to add/change one)
   viterbi.py               Viterbi decoder for the K=7 convolutional code (self-verification)
   loopback.py              full digital-domain encode/decode loopback (self-verification)
 ```
@@ -208,10 +209,18 @@ is not given, the file is saved to `output/` as
 
 ### Scenario presets
 
-`ccsds_chain/presets.py` names a few common encoding-parameter combinations
-(`baseline`, `high_throughput`, `robust_bpsk`, `legacy_compat` -- see the
-file for exactly what each one sets and why), shared between the CLI and
-the GUI so they can't drift apart:
+`ccsds_chain/presets.json` names a few common encoding-parameter
+combinations (`baseline`, `high_throughput`, `robust_bpsk`, `legacy_compat`
+-- see the file for exactly what each one sets and why), shared between the
+CLI and the GUI so they can't drift apart. It's a plain JSON file, edited
+directly -- no code change needed to tweak one or add a new one: copy an
+existing entry, give it a new name and a `description`, and adjust the
+fields (`modulation`, `symbol_rate`, `sps`, `rrc_alpha`, `rrc_span`, `rs_e`,
+`interleave_depth`, `conv_rate`, `randomizer` -- all of them required,
+`ccsds_chain/presets.py` validates the file at import time and fails fast
+with the missing/unknown field's name if one is wrong). `pytest` then
+confirms it's an actually-runnable configuration
+(`tests/test_presets.py`), not just valid JSON.
 
 ```bash
 python generate_signal.py --preset robust_bpsk -o test.raw   # any flag given
