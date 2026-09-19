@@ -450,13 +450,13 @@ with panel:
     <div class="hktm-header">
       <div>
         <div class="hktm-title">HKTM <span>CCSDS</span> Signal Generator</div>
-        <div class="hktm-subtitle">CCSDS 131.0-B-2 &middot; RF-Catcher (TestTree) test signal injection</div>
+        <div class="hktm-subtitle">CCSDS 131.0-B-5 &middot; RF-Catcher (TestTree) test signal injection</div>
       </div>
       <div class="hktm-badges">
         <div class="hktm-badge">{modulation}</div>
-        <div class="hktm-badge">1785 kS/s</div>
-        <div class="hktm-badge">RS(255,223)</div>
-        <div class="hktm-badge">CONV K=7</div>
+        <div class="hktm-badge">{symbol_rate/1e3:.0f} kS/s</div>
+        <div class="hktm-badge">{"RS(255," + str(rs_k) + ")" if fec_rs or is_cadu_input else "RS off"}</div>
+        <div class="hktm-badge">{"CONV K=7 r=" + conv_rate if fec_conv else "CONV off"}</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
