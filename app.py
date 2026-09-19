@@ -20,8 +20,14 @@ import streamlit as st
 
 from ccsds_chain.mapping import BITS_PER_SYMBOL
 from ccsds_chain.pipeline import ASM, ChainParams, export_chain, run_chain
+from ccsds_chain.presets import PRESETS
 from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
+
+# randomizer value ("long"/"short"/"none") -> the selectbox label carrying
+# it, for _apply_preset() below; the reverse mapping (label -> value, used
+# once the widget is built) stays next to that widget, further down.
+_RANDOMIZER_LABELS = {"long": "Long (131071-bit)", "short": "Short (255-bit, legacy)", "none": "None"}
 
 # Exported IQ files are written here (same convention as generate_signal.py's
 # CLI default) rather than held fully in memory: export_chain() streams
@@ -136,10 +142,50 @@ div[data-testid="stExpander"] { background: rgba(255,255,255,0.02); border: 1px 
 # --------------------------------------------------------------------------
 # Sidebar controls
 # --------------------------------------------------------------------------
+def _apply_preset():
+    """on_change callback for the preset selectbox below: Streamlit runs a
+    widget's on_change callback once, *before* the script reruns top to
+    bottom -- so writing these widgets' session_state keys here is exactly
+    the sanctioned way to programmatically set another widget's value (as
+    opposed to writing to session_state after that widget has already been
+    instantiated in the same run, which raises). Because this only fires on
+    an actual change of the preset selectbox (not on every rerun), any
+    individual value the user tweaks afterward sticks instead of being
+    snapped back on the next unrelated rerun."""
+    name = st.session_state["preset_choice"]
+    if name == "Custom":
+        return
+    cfg = PRESETS[name]
+    st.session_state["modulation"] = cfg["modulation"]
+    st.session_state["rate_ref"] = "Symbol rate"
+    st.session_state["symbol_rate"] = cfg["symbol_rate"]
+    st.session_state["rs_e"] = cfg["rs_e"]
+    st.session_state["interleave_depth"] = cfg["interleave_depth"]
+    st.session_state["conv_rate"] = cfg["conv_rate"]
+    st.session_state["randomizer_label"] = _RANDOMIZER_LABELS[cfg["randomizer"]]
+    st.session_state["rrc_alpha"] = cfg["rrc_alpha"]
+    st.session_state["rrc_span"] = cfg["rrc_span"]
+    st.session_state["sps"] = cfg["sps"]
+
+
 with st.sidebar:
+    st.markdown("### Scenario preset")
+    preset_choice = st.selectbox(
+        "Preset", ["Custom"] + sorted(PRESETS), key="preset_choice", on_change=_apply_preset,
+        help=(
+            "Loads a named combination of the encoding parameters below as a "
+            "starting point -- you can still tweak any of them afterward (this "
+            "selector then keeps showing the preset you started from, not "
+            "whether the values still match it exactly). "
+            + " | ".join(f"'{name}': {cfg['description']}" for name, cfg in PRESETS.items())
+        ),
+    )
+    if preset_choice != "Custom":
+        st.caption(PRESETS[preset_choice]["description"])
+
     st.markdown("### Modulation & Encoding")
     modulation = st.selectbox(
-        "Modulation", ["QPSK", "BPSK"],
+        "Modulation", ["QPSK", "BPSK"], key="modulation",
         help=(
             "QPSK (baseline): 2 bits/symbol, 1 CCSDS-native RS/interleave-compatible "
             "chain. BPSK: 1 bit/symbol -- half the bit rate at the same symbol rate/"
@@ -153,7 +199,7 @@ with st.sidebar:
 
     bits_per_symbol = BITS_PER_SYMBOL[modulation]
     rate_ref = st.radio(
-        "Rate input", ["Symbol rate", "Bit rate"], horizontal=True,
+        "Rate input", ["Symbol rate", "Bit rate"], horizontal=True, key="rate_ref",
         help=(
             "Symbol rate and bit rate aren't independent: for a given modulation "
             f"(here {modulation} = {bits_per_symbol} bits/symbol), bit rate = symbol rate x "
@@ -162,7 +208,7 @@ with st.sidebar:
         ),
     )
     if rate_ref == "Symbol rate":
-        symbol_rate = st.number_input("Symbol rate (S/s)", value=1_785_000, step=1_000, format="%d")
+        symbol_rate = st.number_input("Symbol rate (S/s)", value=1_785_000, step=1_000, format="%d", key="symbol_rate")
         bit_rate = symbol_rate * bits_per_symbol
         st.caption(f"Bit rate (derived): {bit_rate:,.0f} bps".replace(",", " "))
     else:
@@ -205,7 +251,7 @@ with st.sidebar:
     rs_col1, rs_col2 = st.columns(2)
     with rs_col1:
         rs_e = st.selectbox(
-            "Error correction E", [16, 8], disabled=not fec_rs and not is_cadu_input,
+            "Error correction E", [16, 8], disabled=not fec_rs and not is_cadu_input, key="rs_e",
             help=(
                 "RS error-correction capability, in symbols (CCSDS 4.3.1, managed "
                 "parameter 12.5). E=16 gives RS(255,223): more parity overhead, "
@@ -219,6 +265,7 @@ with st.sidebar:
     with rs_col2:
         interleave_depth = st.selectbox(
             "Interleave depth I", [1, 2, 3, 4, 5, 8], index=4, disabled=not fec_rs and not is_cadu_input,
+            key="interleave_depth",
             help=(
                 "Number of RS codewords interleaved together per CADU (CCSDS "
                 "4.3.5, managed parameter 12.5). Higher I spreads a burst error "
@@ -241,7 +288,7 @@ with st.sidebar:
 
     fec_conv = st.checkbox("Convolutional K=7", value=True)
     conv_rate = st.selectbox(
-        "Code rate", ["1/2", "2/3", "3/4", "5/6", "7/8"], disabled=not fec_conv,
+        "Code rate", ["1/2", "2/3", "3/4", "5/6", "7/8"], disabled=not fec_conv, key="conv_rate",
         help=(
             "Convolutional code rate via puncturing (CCSDS 3.4, Table 3-1, "
             "managed parameter 12.4). Higher rate transmits fewer coded symbols "
@@ -261,7 +308,7 @@ with st.sidebar:
 
     randomizer_label = st.selectbox(
         "Pseudo-randomizer", ["Long (131071-bit)", "Short (255-bit, legacy)", "None"],
-        disabled=is_cadu_input,
+        disabled=is_cadu_input, key="randomizer_label",
         help=(
             "CCSDS section 10: scrambles the RS-coded data (never the ASM) to "
             "guarantee bit transitions, avoid spectral lines, and aid receiver "
@@ -277,7 +324,7 @@ with st.sidebar:
     st.markdown("### Pulse Shaping (RRC)")
     st.caption(f"Shapes the {modulation} symbols into a band-limited waveform (Root-Raised-Cosine filter) before D/A conversion.")
     rrc_alpha = st.slider(
-        "Roll-off (alpha)", 0.05, 1.00, 0.35, 0.01,
+        "Roll-off (alpha)", 0.05, 1.00, 0.35, 0.01, key="rrc_alpha",
         help=(
             "Excess-bandwidth factor of the RRC filter (0-1). Trades occupied "
             "bandwidth against tolerance to timing/synchronization error: lower "
@@ -289,7 +336,7 @@ with st.sidebar:
         ),
     )
     rrc_span = st.slider(
-        "Span (symbols)", 4, 16, 8, 1,
+        "Span (symbols)", 4, 16, 8, 1, key="rrc_span",
         help=(
             "Length of the RRC filter's impulse response, in symbol periods. A "
             "longer span approximates the ideal (infinite) RRC filter more "
@@ -299,7 +346,7 @@ with st.sidebar:
         ),
     )
     sps = st.select_slider(
-        "Samples/symbol", options=[2, 4, 8], value=4,
+        "Samples/symbol", options=[2, 4, 8], value=4, key="sps",
         help=(
             "Oversampling factor: number of I/Q samples generated per symbol. "
             "Sets the output sample rate = symbol rate x samples/symbol. Needs to "

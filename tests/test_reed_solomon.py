@@ -17,6 +17,8 @@ from ccsds_chain.reed_solomon import (
     _LOG,
     from_dual_basis,
     gf_mul,
+    rs_decode_codeword,
+    rs_decode_interleaved,
     rs_encode_codeword,
     rs_encode_interleaved,
     rs_generator_polynomial,
@@ -170,3 +172,68 @@ class TestInterleaving:
             for jroot in range(128 - e, 128 + e):
                 root = _EXP[(11 * jroot) % 255]
                 assert gf_poly_eval(codeword_conventional, root) == 0
+
+
+class TestDecoding:
+    """Self-verification loopback for the codeword-level encoder: proves
+    rs_decode_codeword actually corrects real injected errors (up to E per
+    codeword), not just that a zero-error codeword passes through -- the
+    exact property the module docstring's decoding-comments section
+    describes needing this kind of check for."""
+
+    @pytest.mark.parametrize("e", [8, 16])
+    def test_decodes_exactly_with_no_errors(self, e):
+        rng = np.random.default_rng(1000 + e)
+        k = 255 - 2 * e
+        message = bytes(int(b) for b in rng.integers(0, 256, size=k, dtype=np.uint8))
+        codeword = message + rs_encode_codeword(message, e)
+        assert rs_decode_codeword(codeword, e) == message
+
+    @pytest.mark.parametrize("e", [8, 16])
+    def test_corrects_every_error_count_up_to_e(self, e):
+        rng = np.random.default_rng(2000 + e)
+        k = 255 - 2 * e
+        for n_errors in range(0, e + 1):
+            message = bytes(int(b) for b in rng.integers(0, 256, size=k, dtype=np.uint8))
+            codeword = bytearray(message + rs_encode_codeword(message, e))
+            positions = rng.choice(255, size=n_errors, replace=False)
+            for pos in positions:
+                codeword[pos] ^= int(rng.integers(1, 256))
+            decoded = rs_decode_codeword(bytes(codeword), e)
+            assert decoded == message, f"E={e}, {n_errors} injected errors"
+
+    @pytest.mark.parametrize("depth", [1, 2, 5, 8])
+    def test_interleaved_round_trip_with_up_to_e_errors_per_codeword(self, depth):
+        rng = np.random.default_rng(3000 + depth)
+        k, n, e = 223, 255, 16
+        data = bytes(int(b) for b in rng.integers(0, 256, size=k * depth, dtype=np.uint8))
+        encoded = bytearray(rs_encode_interleaved(data, k, n, depth))
+        for j in range(depth):
+            n_errors = int(rng.integers(0, e + 1))
+            positions = rng.choice(n, size=n_errors, replace=False)
+            for pos in positions:
+                idx = pos * depth + j
+                encoded[idx] ^= int(rng.integers(1, 256))
+        decoded = rs_decode_interleaved(bytes(encoded), k, n, depth)
+        assert decoded == data
+
+    def test_uncorrectable_codeword_raises_rather_than_miscorrects(self):
+        # A fixed seed known (empirically, see the PR this landed in) to
+        # inject more errors (E+1) than RS(255,223) can correct and produce
+        # a locator polynomial degree that Berlekamp-Massey/Chien-search
+        # detect as inconsistent, rather than one of the rarer cases where
+        # an over-limit pattern happens to look like a valid <=E-error one.
+        rng = np.random.default_rng(9)
+        e = 8
+        k = 255 - 2 * e
+        message = bytes(int(b) for b in rng.integers(0, 256, size=k, dtype=np.uint8))
+        codeword = bytearray(message + rs_encode_codeword(message, e))
+        positions = rng.choice(255, size=e + 1, replace=False)
+        for pos in positions:
+            codeword[pos] ^= int(rng.integers(1, 256))
+        with pytest.raises(ValueError):
+            rs_decode_codeword(bytes(codeword), e)
+
+    def test_unsupported_e_raises(self):
+        with pytest.raises(ValueError):
+            rs_decode_codeword(bytes(255), e=4)

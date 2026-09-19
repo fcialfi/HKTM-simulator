@@ -21,6 +21,9 @@ ccsds_chain/
   pulse_shaping.py         RRC filter
   spectrum.py              PSD/occupied bandwidth (used by app.py and verify_spectrum.py)
   utils.py                 bit/byte helpers, IQ file I/O
+  presets.py               named scenario presets (used by app.py and generate_signal.py)
+  viterbi.py               Viterbi decoder for the K=7 convolutional code (self-verification)
+  loopback.py              full digital-domain encode/decode loopback (self-verification)
 ```
 
 ## Baseline parameters
@@ -203,6 +206,22 @@ output format ones (`--dtype`, `--peak`, `--target-fs`). If `-o`/`--output`
 is not given, the file is saved to `output/` as
 `qpsk_ccsds_<fs>Msps_<n_cadu>cadu_<timestamp>.iq`.
 
+### Scenario presets
+
+`ccsds_chain/presets.py` names a few common encoding-parameter combinations
+(`baseline`, `high_throughput`, `robust_bpsk`, `legacy_compat` -- see the
+file for exactly what each one sets and why), shared between the CLI and
+the GUI so they can't drift apart:
+
+```bash
+python generate_signal.py --preset robust_bpsk -o test.raw   # any flag given
+python generate_signal.py --preset robust_bpsk --alpha 0.35  # explicitly still overrides the preset
+```
+
+In the GUI, pick one from the "Scenario preset" selector at the top of the
+sidebar -- it just fills in the encoding parameters below as a starting
+point, so you can still tweak any of them afterward.
+
 ### Tests
 
 ```bash
@@ -219,6 +238,29 @@ rather than hardcoded external test vectors, so a refactor that silently
 breaks one of those properties fails CI instead of only showing up as a
 subtly wrong spectrum. Runs in a few seconds; also run automatically on
 every push/PR (`.github/workflows/tests.yml`).
+
+### Self-verification decoder (loopback)
+
+`ccsds_chain/viterbi.py` (Viterbi decoder for the K=7 convolutional code)
+and `ccsds_chain/reed_solomon.py`'s `rs_decode_codeword`/
+`rs_decode_interleaved` (Berlekamp-Massey/Chien-search/Forney) close the
+loop on the two parts of the chain hand-derived from the CCSDS spec: given
+what this project's own encoder produced -- including corrupted, so an
+actual *correction* has to happen, not just a pass-through -- can this
+project's own decoder recover the exact original data?
+`ccsds_chain/loopback.py` ties both together (RS decode + ASM check +
+descramble + Viterbi decode) into a single `decode_transfer_frame_stream()`
+call, exercised end-to-end by `tests/test_loopback.py`.
+
+This is scoped to the digital/bit domain only, not the actual generated IQ
+waveform -- recovering symbols from real IQ needs a matched filter and
+symbol-timing recovery, a separate, larger piece of receiver DSP this
+project doesn't implement (it's a signal *generator*, per the top of this
+file). What it validates instead is the part of the chain most likely to
+hide a subtle spec-transcription bug: encoding alone can produce a
+codeword divisible by the right roots (algebraically well-formed) without
+ever proving that a *real* error in it is actually correctable, which only
+running the decoder for real, against real injected errors, can show.
 
 ## Limitations
 

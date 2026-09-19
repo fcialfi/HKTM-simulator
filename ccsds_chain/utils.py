@@ -14,6 +14,15 @@ def bytes_to_bits(data: bytes) -> np.ndarray:
     return np.unpackbits(arr, bitorder="big")
 
 
+def bits_to_bytes(bits: np.ndarray) -> bytes:
+    """Inverse of bytes_to_bits(): MSB-first bit packing. `bits` must be a
+    multiple of 8 long (true of every bit-level artifact in this chain --
+    CADUs, RS codewords, Transfer Frames -- which are always byte-aligned)."""
+    if len(bits) % 8 != 0:
+        raise ValueError(f"bit length {len(bits)} is not a multiple of 8")
+    return np.packbits(np.asarray(bits, dtype=np.uint8), bitorder="big").tobytes()
+
+
 def generate_payload(n_cadu: int, frame_bytes: int, source_path: str | None = None,
                       source_bytes: bytes | None = None, seed: int | None = 42) -> bytes:
     """Build the concatenated data-zone payload for `n_cadu` CADUs.
