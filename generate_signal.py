@@ -26,7 +26,6 @@ import os
 
 from ccsds_chain.mapping import BITS_PER_SYMBOL
 from ccsds_chain.pipeline import ChainParams, export_chain
-from ccsds_chain.presets import PRESETS
 from ccsds_chain.utils import resample_ratio
 
 # --------------------------------------------------------------------------
@@ -65,41 +64,22 @@ OUTPUT_DIR = "output"
 
 
 def build_cli():
-    # Pre-scan argv for --preset alone, so its values become this parser's
-    # *defaults* for the matching flags below: any of those flags given
-    # explicitly on the command line still overrides it, since argparse's
-    # own default is only ever used when a flag is absent.
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--preset", choices=sorted(PRESETS))
-    preset_name = pre.parse_known_args()[0].preset
-    preset = PRESETS[preset_name] if preset_name else {}
-
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument(
-        "--preset", choices=sorted(PRESETS),
-        help="Named scenario preset providing defaults for --modulation/--alpha/--sps/"
-             "--span/--rs-e/--interleave-depth/--conv-rate/--randomizer (any of those "
-             "given explicitly still overrides it). Presets: "
-             + " | ".join(f"{name}: {cfg['description']}" for name, cfg in PRESETS.items()),
-    )
     p.add_argument("--n-cadu", type=int, default=N_CADU)
-    p.add_argument("--modulation", choices=["QPSK", "BPSK"], default=preset.get("modulation", MODULATION),
+    p.add_argument("--modulation", choices=["QPSK", "BPSK"], default=MODULATION,
                     help="QPSK (baseline, 2 bits/symbol) or BPSK (1 bit/symbol, half the bit "
                          "rate at the same symbol rate -- the modulation the base rate-1/2 "
                          "convolutional code's G2 inversion, CCSDS 3.3.1(5), is specified against)")
-    p.add_argument("--alpha", type=float, default=preset.get("rrc_alpha", RRC_ALPHA))
-    p.add_argument("--sps", type=int, default=preset.get("sps", SAMPLES_PER_SYM))
-    p.add_argument("--span", type=int, default=preset.get("rrc_span", RRC_SPAN))
+    p.add_argument("--alpha", type=float, default=RRC_ALPHA)
+    p.add_argument("--sps", type=int, default=SAMPLES_PER_SYM)
+    p.add_argument("--span", type=int, default=RRC_SPAN)
     p.add_argument("--no-rs", action="store_true", help="disable Reed-Solomon FEC")
-    p.add_argument("--rs-e", type=int, choices=[8, 16], default=preset.get("rs_e", RS_E),
-                    help="RS error correction capability")
-    p.add_argument("--interleave-depth", type=int, choices=[1, 2, 3, 4, 5, 8],
-                    default=preset.get("interleave_depth", INTERLEAVE_DEPTH))
+    p.add_argument("--rs-e", type=int, choices=[8, 16], default=RS_E, help="RS error correction capability")
+    p.add_argument("--interleave-depth", type=int, choices=[1, 2, 3, 4, 5, 8], default=INTERLEAVE_DEPTH)
     p.add_argument("--no-conv", action="store_true", help="disable convolutional FEC")
-    p.add_argument("--conv-rate", choices=["1/2", "2/3", "3/4", "5/6", "7/8"],
-                    default=preset.get("conv_rate", CONV_RATE))
+    p.add_argument("--conv-rate", choices=["1/2", "2/3", "3/4", "5/6", "7/8"], default=CONV_RATE)
     p.add_argument("--no-invert-g2", action="store_true")
-    p.add_argument("--randomizer", choices=["none", "short", "long"], default=preset.get("randomizer", RANDOMIZER),
+    p.add_argument("--randomizer", choices=["none", "short", "long"], default=RANDOMIZER,
                     help="CCSDS pseudo-randomizer: 'long' (131071-bit, current standard default), "
                          "'short' (255-bit, legacy), or 'none'")
     p.add_argument("--input-format", choices=["transfer_frame", "cadu"], default=INPUT_FORMAT,
