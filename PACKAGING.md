@@ -87,5 +87,4 @@ pyinstaller --onefile generate_signal.py
 
 `dist\generate_signal.exe` then works exactly like
 `python generate_signal.py` did, with the same command-line flags
-(`--preset baseline --n-cadu 100 -o test.raw`, etc.), just without needing
-Python installed.
+(`--n-cadu 100 -o test.raw`, etc.), just without needing Python installed.
