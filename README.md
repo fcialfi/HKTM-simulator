@@ -173,15 +173,34 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
    same symbol rate, but the modulation the base rate-1/2 convolutional
    code's G2 inversion (3.3.1(5)) is specified against.
 8. **RRC pulse shaping** (configurable alpha, default 0.35).
-9. **Normalization**: the final signal is scaled to a configurable
-   normalized peak amplitude (default 0.9 on a [-1,+1] scale), to leave
-   headroom and prevent saturation/clipping during RF playback.
-10. **Optional resampling**: if requested (CLI `--target-fs` parameter, or
+9. **Transmitter impairments** (optional, disabled by default -- "Transmitter
+   Impairments" in the GUI, or `--freq-offset-hz`/`--iq-gain-imbalance-db`/
+   `--iq-phase-imbalance-deg`/`--phase-noise-linewidth-hz` on the CLI),
+   applied to the pulse-shaped IQ (`ccsds_chain/impairments.py`): a real
+   transmitter's own non-idealities, distinct from a replayer's AWGN
+   injection (which characterizes a receiver's sensitivity vs Eb/N0, not its
+   tolerance to an imperfect transmitter). Frequency offset is a constant
+   residual LO error (Hz), for validating carrier-recovery acquisition/
+   tracking against a real, not perfectly on-frequency, signal. IQ gain/
+   phase imbalance models an IQ modulator's I/Q branch mismatch as the
+   standard `s' = A*s + B*conj(s)` mirror-image transform, producing a
+   mirror tone at an image rejection ratio of `20*log10(|A|/|B|)` -- checked
+   in `tests/test_impairments.py` against a synthetic tone's own FFT. Phase
+   noise models a free-running oscillator's single-sideband linewidth (Hz)
+   as a Wiener (random-walk) phase process, for validating tolerance to
+   constellation smearing from a real transmitter LO. All three are applied
+   deterministically (seeded via `--impairment-seed`) and carry their state
+   correctly across `export_chain()`'s batches, exactly like every other
+   stage in this chain.
+10. **Normalization**: the final signal is scaled to a configurable
+    normalized peak amplitude (default 0.9 on a [-1,+1] scale), to leave
+    headroom and prevent saturation/clipping during RF playback.
+11. **Optional resampling**: if requested (CLI `--target-fs` parameter, or
     "Resample to fixed rate" in the GUI), the signal is resampled
     (`scipy.signal.resample_poly`, exact integer ratio) to a specific sample
     rate accepted by the playback instrument, independent of the native
     `symbol_rate x samples/symbol` frequency used internally by the chain.
-11. **Output**: raw interleaved IQ file (`I0,Q0,I1,Q1,...`, no header), in
+12. **Output**: raw interleaved IQ file (`I0,Q0,I1,Q1,...`, no header), in
     `float32` (default, range [-1,+1]) or `int16` (selectable; RF-Catcher/
     TestTree format: little-endian, 12 significant bits in two's complement,
     LSB-aligned, range [-2048, 2047]), with a companion `.meta.json` file
@@ -257,6 +276,12 @@ python generate_signal.py --corrupt-rs-symbols 16 --corrupt-cadu-indices 10 -o t
 # Corrupt every VC1 frame (17 errors, beyond E=16) to check the receiver's
 # per-channel FER report blames VC1 alone, leaving VC0/VC2 clean
 python generate_signal.py --vcid-list 0,1,2 --corrupt-rs-symbols 17 --corrupt-vc 1 -o test6.raw
+
+# A real transmitter is never perfect: 5 kHz LO offset, 0.8 dB/3deg IQ
+# imbalance, 200 Hz phase noise linewidth -- validates carrier recovery,
+# image rejection and EVM tolerance against a real, not idealized, signal
+python generate_signal.py --freq-offset-hz 5000 --iq-gain-imbalance-db 0.8 \
+    --iq-phase-imbalance-deg 3 --phase-noise-linewidth-hz 200 -o test7.raw
 
 python verify_spectrum.py output/qpsk_ccsds_....iq --plot spectrum.png
 ```

@@ -409,6 +409,64 @@ class TestDeterministicCorruption:
             rs_decode_interleaved(rs_region, p.rs_k, p.rs_n, p.interleave_depth)
 
 
+class TestTransmitterImpairments:
+    """freq_offset_hz / iq_gain_imbalance_db / iq_phase_imbalance_deg /
+    phase_noise_linewidth_hz model a real transmitter's own imperfections
+    (LO offset, IQ modulator mismatch, oscillator phase noise), applied to
+    the pulse-shaped IQ -- distinct from a replayer's AWGN, which
+    characterizes receiver sensitivity rather than transmitter realism."""
+
+    def test_disabled_by_default_matches_pre_feature_output_bit_for_bit(self):
+        p = _small_params()
+        result = run_chain(p)
+        assert result.meta["freq_offset_hz"] is None
+        assert result.meta["iq_gain_imbalance_db"] is None
+        assert result.meta["iq_phase_imbalance_deg"] is None
+        assert result.meta["phase_noise_linewidth_hz"] is None
+
+        p_explicit_zero = _small_params(freq_offset_hz=0.0, iq_gain_imbalance_db=0.0,
+                                         iq_phase_imbalance_deg=0.0, phase_noise_linewidth_hz=0.0)
+        assert np.array_equal(result.iq, run_chain(p_explicit_zero).iq)
+
+    def test_rejects_negative_linewidth(self):
+        with pytest.raises(ValueError, match="phase_noise_linewidth_hz"):
+            run_chain(_small_params(phase_noise_linewidth_hz=-1.0))
+
+    def test_frequency_offset_changes_the_signal(self):
+        p_plain = _small_params(n_cadu=20)
+        p_offset = _small_params(n_cadu=20, freq_offset_hz=50_000.0)
+        assert not np.array_equal(run_chain(p_plain).iq, run_chain(p_offset).iq)
+
+    def test_iq_imbalance_changes_the_signal(self):
+        p_plain = _small_params(n_cadu=20)
+        p_imbalanced = _small_params(n_cadu=20, iq_gain_imbalance_db=1.0, iq_phase_imbalance_deg=5.0)
+        assert not np.array_equal(run_chain(p_plain).iq, run_chain(p_imbalanced).iq)
+
+    def test_phase_noise_changes_the_signal(self):
+        p_plain = _small_params(n_cadu=20)
+        p_noisy = _small_params(n_cadu=20, phase_noise_linewidth_hz=500.0)
+        assert not np.array_equal(run_chain(p_plain).iq, run_chain(p_noisy).iq)
+
+    def test_meta_reports_configured_values(self):
+        p = _small_params(freq_offset_hz=1234.0, iq_gain_imbalance_db=0.5,
+                           iq_phase_imbalance_deg=2.0, phase_noise_linewidth_hz=300.0)
+        meta = run_chain(p).meta
+        assert meta["freq_offset_hz"] == 1234.0
+        assert meta["iq_gain_imbalance_db"] == 0.5
+        assert meta["iq_phase_imbalance_deg"] == 2.0
+        assert meta["phase_noise_linewidth_hz"] == 300.0
+
+    def test_export_chain_matches_run_chain_with_all_impairments(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "_EXPORT_BATCH_TARGET_BYTES", 1)  # forces batch_n_cadu == 1
+        p = _small_params(n_cadu=6, freq_offset_hz=5_000.0, iq_gain_imbalance_db=0.8,
+                           iq_phase_imbalance_deg=3.0, phase_noise_linewidth_hz=200.0, impairment_seed=99)
+        expected = pack_iq_interleaved(normalize_peak(run_chain(p).iq, peak=0.9), "int16")
+
+        out_path = tmp_path / "out.raw"
+        export_chain(p, str(out_path), output_dtype="int16", peak=0.9)
+        assert out_path.read_bytes() == expected
+
+
 class TestExportChainMatchesRunChain:
     """export_chain()'s own docstring claim: for int16 output, batched
     streaming export is exactly byte-for-byte identical to packing
