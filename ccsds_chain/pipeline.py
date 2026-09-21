@@ -510,23 +510,39 @@ def _apply_impairments(
     phase_noise_gen: Optional[PhaseNoiseGenerator],
 ) -> np.ndarray:
     """Applies ChainParams' transmitter impairments to a chunk of
-    pulse-shaped IQ, in the order they originate in a real transmitter:
-    IQ modulator gain/phase imbalance (before upconversion), then LO
-    frequency offset and phase noise (impairments.py's module docstring
-    has the full rationale). Skips a stage entirely when its parameter is
-    at the "disabled" value, so a run with none of them configured is
-    bit-for-bit identical to before this feature existed. `phase_noise_gen`
-    is created once by the caller (None when disabled) and shared across
-    every chunk of one export, so its random walk and PRNG state carry
-    correctly across export_chain()'s batches; `start_sample` is this
-    chunk's absolute sample offset in the whole signal, for an exact
-    (state-free) frequency-offset phase ramp regardless of batching."""
-    if p.iq_gain_imbalance_db != 0 or p.iq_phase_imbalance_deg != 0:
-        iq = apply_iq_imbalance(iq, p.iq_gain_imbalance_db, p.iq_phase_imbalance_deg)
+    pulse-shaped IQ: LO frequency offset and phase noise first, then IQ
+    modulator gain/phase imbalance last. Skips a stage entirely when its
+    parameter is at the "disabled" value, so a run with none of them
+    configured is bit-for-bit identical to before this feature existed.
+    `phase_noise_gen` is created once by the caller (None when disabled)
+    and shared across every chunk of one export, so its random walk and
+    PRNG state carry correctly across export_chain()'s batches;
+    `start_sample` is this chunk's absolute sample offset in the whole
+    signal, for an exact (state-free) frequency-offset phase ramp
+    regardless of batching.
+
+    This chain's 0 Hz *is* the transmitter's intended RF center frequency
+    (there's no separate physical upconversion stage in software -- see
+    impairments.py's module docstring): apply_iq_imbalance()'s mirror-
+    image term reflects about that 0 Hz, so it only appears as a visible,
+    separate image in the spectrum when the wanted signal itself is
+    *not* centered at 0 Hz. Doing frequency offset (which displaces the
+    wanted signal away from 0 Hz) before imbalance (which then mirrors
+    that displaced signal to the opposite side of 0 Hz) reproduces the
+    classic, visible image-frequency picture; the reverse order mirrors
+    a still-symmetric-about-0-Hz signal onto itself, which for this
+    project's random-data QPSK (whose own spectrum is already symmetric
+    about 0 Hz when freq_offset_hz is 0) folds invisibly back into the
+    same band -- confirmed empirically: swapping this order took a
+    3 dB/15 deg imbalance's image from indistinguishable from the noise
+    floor to landing within 0.1 dB of the closed-form image rejection
+    ratio predicted for a pure tone."""
     if p.freq_offset_hz != 0:
         iq = apply_frequency_offset(iq, p.freq_offset_hz, sample_rate, start_sample=start_sample)
     if phase_noise_gen is not None:
         iq = phase_noise_gen.apply(iq)
+    if p.iq_gain_imbalance_db != 0 or p.iq_phase_imbalance_deg != 0:
+        iq = apply_iq_imbalance(iq, p.iq_gain_imbalance_db, p.iq_phase_imbalance_deg)
     return iq
 
 

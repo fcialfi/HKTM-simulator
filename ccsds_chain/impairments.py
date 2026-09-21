@@ -6,11 +6,16 @@ receiver's sensitivity; these validate its tolerance to a real
 transmitter's non-idealities: a residual LO frequency/phase error, an
 imperfect IQ modulator, and oscillator phase noise.
 
-Applied in this order (matching where each originates in a real
-transmitter): IQ gain/phase imbalance (the IQ modulator, before
-upconversion) -> frequency offset -> phase noise (both from the LO/
-upconversion stage; their relative order doesn't matter -- both are pure
-phase rotations, which commute).
+Applied (see pipeline._apply_impairments()) as: frequency offset -> phase
+noise -> IQ imbalance last. This chain's 0 Hz *is* the transmitter's
+intended RF center frequency (there is no separate software upconversion
+stage), and apply_iq_imbalance()'s mirror-image term reflects about that
+0 Hz -- so it only produces a visible, separate image in the spectrum once
+frequency offset has already displaced the wanted signal away from 0 Hz;
+applied first, to a signal still symmetric about 0 Hz (as this project's
+random-data QPSK is, with no offset), the mirror folds invisibly back onto
+the same band. Frequency offset and phase noise commute with each other
+(both are pure phase rotations), so their relative order doesn't matter.
 """
 
 import numpy as np
