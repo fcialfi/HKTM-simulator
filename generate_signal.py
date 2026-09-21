@@ -150,6 +150,20 @@ def build_cli():
     p.add_argument("--impairment-seed", type=int, default=2718,
                     help="seed for the phase noise random walk -- deterministic and "
                          "reproducible across runs")
+    p.add_argument("--pa-backoff-db", type=float, default=None,
+                    help="power amplifier saturation point (Rapp AM-AM model), in dB above "
+                         "this project's reference unit amplitude (1.0, an ideal symbol's own "
+                         "magnitude) -- models PA compression/saturation, the last physical "
+                         "stage before the antenna: negative values saturate more aggressively "
+                         "(visible spectral regrowth just outside the occupied bandwidth); "
+                         "default: not set (disabled)")
+    p.add_argument("--pa-smoothness", type=float, default=3.0,
+                    help="Rapp model knee sharpness (higher = sharper transition from linear "
+                         "to saturated); only used with --pa-backoff-db")
+    p.add_argument("--pa-am-pm-deg-per-db", type=float, default=0.0,
+                    help="AM-PM conversion, in degrees of phase shift per dB of AM-AM "
+                         "compression (the same figure real TWTA/SSPA datasheets quote); "
+                         "0 (default) disables it; only used with --pa-backoff-db")
     p.add_argument("--dtype", choices=["float32", "int16"], default=OUTPUT_DTYPE,
                     help="IQ sample format for the output file; int16 is the RF-Catcher "
                          "format (little-endian, 12 significant bits, range [-2048, 2047])")
@@ -219,6 +233,9 @@ def main():
         iq_phase_imbalance_deg=args.iq_phase_imbalance_deg,
         phase_noise_linewidth_hz=args.phase_noise_linewidth_hz,
         impairment_seed=args.impairment_seed,
+        pa_backoff_db=args.pa_backoff_db,
+        pa_smoothness=args.pa_smoothness,
+        pa_am_pm_deg_per_db=args.pa_am_pm_deg_per_db,
     )
     is_cadu_input = params.input_format == "cadu"
     unit_bytes = len(params.asm) + params.rs_n * params.interleave_depth if is_cadu_input else params.rs_k * params.interleave_depth
@@ -263,6 +280,11 @@ def main():
         impairments.append(f"IQ imbalance {params.iq_gain_imbalance_db:+.2f} dB / {params.iq_phase_imbalance_deg:+.2f} deg")
     if params.phase_noise_linewidth_hz > 0:
         impairments.append(f"phase noise {params.phase_noise_linewidth_hz:.1f} Hz linewidth")
+    if params.pa_backoff_db is not None:
+        pa_desc = f"PA backoff {params.pa_backoff_db:+.1f} dB, smoothness {params.pa_smoothness:.1f}"
+        if params.pa_am_pm_deg_per_db != 0:
+            pa_desc += f", AM-PM {params.pa_am_pm_deg_per_db:.1f} deg/dB"
+        impairments.append(pa_desc)
     if impairments:
         print(f"       -> transmitter impairments: {', '.join(impairments)}")
 

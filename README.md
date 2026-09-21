@@ -174,29 +174,51 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
    code's G2 inversion (3.3.1(5)) is specified against.
 8. **RRC pulse shaping** (configurable alpha, default 0.35).
 9. **Transmitter impairments** (optional, disabled by default -- "Transmitter
-   Impairments" in the GUI, or `--freq-offset-hz`/`--iq-gain-imbalance-db`/
-   `--iq-phase-imbalance-deg`/`--phase-noise-linewidth-hz` on the CLI),
-   applied to the pulse-shaped IQ (`ccsds_chain/impairments.py`): a real
-   transmitter's own non-idealities, distinct from a replayer's AWGN
-   injection (which characterizes a receiver's sensitivity vs Eb/N0, not its
-   tolerance to an imperfect transmitter). Frequency offset is a constant
-   residual LO error (Hz), for validating carrier-recovery acquisition/
-   tracking against a real, not perfectly on-frequency, signal. IQ gain/
-   phase imbalance models an IQ modulator's I/Q branch mismatch as the
-   standard `s' = A*s + B*conj(s)` mirror-image transform, producing a
-   mirror tone at an image rejection ratio of `20*log10(|A|/|B|)` -- checked
-   in `tests/test_impairments.py` against a synthetic tone's own FFT. Phase
-   noise models a free-running oscillator's single-sideband linewidth (Hz)
-   as a Wiener (random-walk) phase process, for validating tolerance to
-   constellation smearing from a real transmitter LO. All three are applied
-   deterministically (seeded via `--impairment-seed`) and carry their state
-   correctly across `export_chain()`'s batches, exactly like every other
-   stage in this chain. The GUI's live "QPSK constellation" plot reflects
-   them: it samples the actual (possibly impaired) IQ through a matched RRC
-   filter (`pulse_shaping.matched_filter_sample()`), not the ideal
-   pre-pulse-shaping symbols -- e.g. a nonzero phase noise linewidth visibly
-   spreads the 4 QPSK points into a ring (constant-magnitude phase
-   rotation), rather than always showing a perfect, unaffected constellation.
+   Impairments" in the GUI, or the flags named below on the CLI), applied to
+   the pulse-shaped IQ (`ccsds_chain/impairments.py`): a real transmitter's
+   own non-idealities, distinct from a replayer's AWGN injection (which
+   characterizes a receiver's sensitivity vs Eb/N0, not its tolerance to an
+   imperfect transmitter). Grouped by which physical subsystem each comes
+   from, applied in that order (frequency offset -> phase noise -> IQ
+   imbalance -> PA nonlinearity), matching where each actually originates
+   along a real signal path:
+   - **LO/synthesizer** (`--freq-offset-hz` / `--phase-noise-linewidth-hz`):
+     frequency offset is a constant residual LO error (Hz), for validating
+     carrier-recovery acquisition/tracking against a real, not perfectly
+     on-frequency, signal. Phase noise models a free-running oscillator's
+     single-sideband linewidth (Hz) as a Wiener (random-walk) phase process,
+     for validating tolerance to constellation smearing from a real
+     transmitter LO.
+   - **IQ modulator** (`--iq-gain-imbalance-db` / `--iq-phase-imbalance-deg`):
+     models the modulator's I/Q branch mismatch as the standard
+     `s' = A*s + B*conj(s)` mirror-image transform, producing a mirror tone
+     at an image rejection ratio of `20*log10(|A|/|B|)` -- checked in
+     `tests/test_impairments.py` against a synthetic tone's own FFT. Only
+     becomes visible in the spectrum once a frequency offset has displaced
+     the wanted signal away from 0 Hz first (this chain's 0 Hz *is* the
+     transmitter's RF center frequency); with no offset, a symmetric random-
+     data QPSK spectrum's own mirror folds invisibly back onto itself.
+   - **Power amplifier** (`--pa-backoff-db` / `--pa-smoothness` /
+     `--pa-am-pm-deg-per-db`, the last physical stage before the antenna):
+     Rapp AM-AM saturation/compression model, with optional AM-PM
+     conversion (degrees of phase shift per dB of compression, the same
+     figure real TWTA/SSPA datasheets quote). `pa_backoff_db` is how far
+     above this project's reference unit amplitude (1.0, an ideal symbol's
+     own magnitude) the PA saturates -- unlike a pure phase rotation or a
+     linear image term, this is a genuine nonlinearity, so it generates
+     *spectral regrowth* (odd-order intermodulation) visible just outside
+     the occupied bandwidth, the same adjacent-channel-power signature a
+     real PA's compression produces.
+
+   All are applied deterministically (LO impairments seeded via
+   `--impairment-seed`) and carry their state correctly across
+   `export_chain()`'s batches, exactly like every other stage in this chain.
+   The GUI's live "QPSK constellation" plot reflects all of them: it samples
+   the actual (possibly impaired) IQ through a matched RRC filter
+   (`pulse_shaping.matched_filter_sample()`), not the ideal pre-pulse-shaping
+   symbols -- e.g. a nonzero phase noise linewidth visibly spreads the 4
+   QPSK points into a ring (constant-magnitude phase rotation), rather than
+   always showing a perfect, unaffected constellation.
 10. **Normalization**: the final signal is scaled to a configurable
     normalized peak amplitude (default 0.9 on a [-1,+1] scale), to leave
     headroom and prevent saturation/clipping during RF playback.
@@ -287,6 +309,10 @@ python generate_signal.py --vcid-list 0,1,2 --corrupt-rs-symbols 17 --corrupt-vc
 # image rejection and EVM tolerance against a real, not idealized, signal
 python generate_signal.py --freq-offset-hz 5000 --iq-gain-imbalance-db 0.8 \
     --iq-phase-imbalance-deg 3 --phase-noise-linewidth-hz 200 -o test7.raw
+
+# PA driven 6 dB into saturation, with 3 deg/dB AM-PM -- check the receiver
+# tolerates the resulting spectral regrowth/EVM degradation
+python generate_signal.py --pa-backoff-db -6 --pa-smoothness 3 --pa-am-pm-deg-per-db 3 -o test8.raw
 
 python verify_spectrum.py output/qpsk_ccsds_....iq --plot spectrum.png
 ```

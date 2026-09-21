@@ -15,7 +15,7 @@ from .scrambler import pn_sequence
 from .mapping import BITS_PER_SYMBOL, bits_to_nrzl, map_symbols
 from .pulse_shaping import rrc_taps, pulse_shape, RRCPulseShaper
 from .transfer_frame import PRIMARY_HEADER_BYTES, build_primary_header, vcid_schedule_counts
-from .impairments import apply_frequency_offset, apply_iq_imbalance, PhaseNoiseGenerator
+from .impairments import apply_frequency_offset, apply_iq_imbalance, apply_pa_nonlinearity, PhaseNoiseGenerator
 from .utils import (bytes_to_bits, find_all_cadu_positions, find_cadu_sync, generate_payload,
                      pack_iq_interleaved, resample_iq)
 
@@ -113,6 +113,22 @@ class ChainParams:
                                             # a real (non-ideal) transmitter LO.
     impairment_seed: int = 2718  # seed for the phase noise random walk -- deterministic and
                                   # reproducible across runs; independent of corrupt_seed above.
+    pa_backoff_db: Optional[float] = None  # None = disabled (default). Otherwise, the power
+                                            # amplifier's saturation point, in dB above this
+                                            # project's reference unit amplitude (1.0, an ideal
+                                            # symbol's own magnitude -- see impairments.
+                                            # apply_pa_nonlinearity for why). Models AM-AM
+                                            # saturation/compression (Rapp) -- and, with
+                                            # pa_am_pm_deg_per_db, AM-PM conversion -- the last
+                                            # physical stage before the antenna, applied after
+                                            # every other transmitter impairment.
+    pa_smoothness: float = 3.0  # Rapp model's knee sharpness (p): higher = sharper transition
+                                 # from linear to saturated, lower = softer. Only meaningful
+                                 # when pa_backoff_db is set.
+    pa_am_pm_deg_per_db: float = 0.0  # 0 = no AM-PM conversion. Phase shift, in degrees per dB
+                                       # of AM-AM compression -- the same figure real TWTA/SSPA
+                                       # datasheets quote. Only meaningful when pa_backoff_db is
+                                       # set.
 
     @property
     def rs_k(self) -> int:
@@ -230,6 +246,8 @@ def _validate_chain_params(p: ChainParams) -> None:
                     raise ValueError(f"corrupt_cadu_indices must be non-negative, got {idx}")
     if p.phase_noise_linewidth_hz < 0:
         raise ValueError(f"phase_noise_linewidth_hz must be non-negative, got {p.phase_noise_linewidth_hz}")
+    if p.pa_backoff_db is not None and p.pa_smoothness <= 0:
+        raise ValueError(f"pa_smoothness must be positive, got {p.pa_smoothness}")
 
 
 def _unit_bytes(p: ChainParams) -> tuple:
@@ -502,6 +520,9 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "iq_gain_imbalance_db": p.iq_gain_imbalance_db if p.iq_gain_imbalance_db != 0 else None,
         "iq_phase_imbalance_deg": p.iq_phase_imbalance_deg if p.iq_phase_imbalance_deg != 0 else None,
         "phase_noise_linewidth_hz": p.phase_noise_linewidth_hz if p.phase_noise_linewidth_hz > 0 else None,
+        "pa_backoff_db": p.pa_backoff_db,
+        "pa_smoothness": p.pa_smoothness if p.pa_backoff_db is not None else None,
+        "pa_am_pm_deg_per_db": p.pa_am_pm_deg_per_db if p.pa_backoff_db is not None else None,
     }
 
 
@@ -510,10 +531,13 @@ def _apply_impairments(
     phase_noise_gen: Optional[PhaseNoiseGenerator],
 ) -> np.ndarray:
     """Applies ChainParams' transmitter impairments to a chunk of
-    pulse-shaped IQ: LO frequency offset and phase noise first, then IQ
-    modulator gain/phase imbalance last. Skips a stage entirely when its
-    parameter is at the "disabled" value, so a run with none of them
-    configured is bit-for-bit identical to before this feature existed.
+    pulse-shaped IQ, in the order they originate along the real signal
+    path: LO frequency offset and phase noise, then IQ modulator gain/
+    phase imbalance, then PA nonlinearity last (the final physical stage
+    before the antenna, acting on whatever offset/noisy/imbalanced signal
+    reaches it). Skips a stage entirely when its parameter is at the
+    "disabled" value, so a run with none of them configured is bit-for-bit
+    identical to before this feature existed.
     `phase_noise_gen` is created once by the caller (None when disabled)
     and shared across every chunk of one export, so its random walk and
     PRNG state carry correctly across export_chain()'s batches;
@@ -543,6 +567,8 @@ def _apply_impairments(
         iq = phase_noise_gen.apply(iq)
     if p.iq_gain_imbalance_db != 0 or p.iq_phase_imbalance_deg != 0:
         iq = apply_iq_imbalance(iq, p.iq_gain_imbalance_db, p.iq_phase_imbalance_deg)
+    if p.pa_backoff_db is not None:
+        iq = apply_pa_nonlinearity(iq, p.pa_backoff_db, p.pa_smoothness, p.pa_am_pm_deg_per_db)
     return iq
 
 

@@ -535,11 +535,11 @@ with st.sidebar:
             "Applies real-transmitter non-idealities to the pulse-shaped IQ -- "
             "distinct from a replayer's AWGN (which characterizes receiver "
             "sensitivity vs Eb/N0): these validate a receiver's tolerance to an "
-            "imperfect transmitter itself. Frequency offset tests carrier-"
-            "recovery acquisition against a real LO error; IQ gain/phase "
-            "imbalance tests tolerance to a real IQ modulator's mirror-image "
-            "distortion; phase noise tests tolerance to constellation smearing "
-            "from a real (non-ideal) oscillator."
+            "imperfect transmitter itself, grouped by which physical subsystem "
+            "each comes from: the LO/synthesizer (frequency offset, phase "
+            "noise), the IQ modulator (gain/phase imbalance), and the power "
+            "amplifier (saturation/compression, AM-PM conversion) -- the last "
+            "stage before the antenna, applied after the other two."
         ),
     )
     freq_offset_hz = 0.0
@@ -547,11 +547,22 @@ with st.sidebar:
     iq_phase_imbalance_deg = 0.0
     phase_noise_linewidth_hz = 0.0
     impairment_seed = 2718
+    enable_pa = False
+    pa_backoff_db = None
+    pa_smoothness = 3.0
+    pa_am_pm_deg_per_db = 0.0
     if enable_impairments:
+        st.markdown("**LO / Synthesizer**")
         freq_offset_hz = st.number_input(
             "Frequency offset (Hz)", value=0.0, step=100.0,
             help="Constant residual LO frequency offset, positive or negative.",
         )
+        phase_noise_linewidth_hz = st.number_input(
+            "Phase noise linewidth (Hz)", min_value=0.0, value=0.0, step=10.0,
+            help="Free-running-oscillator single-sideband 3 dB linewidth. 0 disables it.",
+        )
+
+        st.markdown("**IQ Modulator**")
         iq_col1, iq_col2 = st.columns(2)
         with iq_col1:
             iq_gain_imbalance_db = st.number_input(
@@ -563,17 +574,56 @@ with st.sidebar:
                 "IQ phase imbalance (deg)", value=0.0, step=0.5,
                 help="Deviation from ideal 90-degree I/Q separation.",
             )
-        phase_noise_linewidth_hz = st.number_input(
-            "Phase noise linewidth (Hz)", min_value=0.0, value=0.0, step=10.0,
-            help="Free-running-oscillator single-sideband 3 dB linewidth. 0 disables it.",
+
+        st.markdown("**Power Amplifier**")
+        enable_pa = st.checkbox(
+            "Saturation / compression",
+            help=(
+                "Rapp AM-AM model (soft saturation, standard for solid-state "
+                "PAs) with optional AM-PM conversion -- the last physical stage "
+                "before the antenna, applied after the LO and IQ modulator "
+                "impairments above. Produces spectral regrowth just outside "
+                "the occupied bandwidth (odd-order intermodulation), the same "
+                "signature a spectrum analyzer's adjacent-channel power "
+                "measurement is built to catch on a real PA."
+            ),
         )
+        if enable_pa:
+            pa_col1, pa_col2 = st.columns(2)
+            with pa_col1:
+                pa_backoff_db = st.number_input(
+                    "Input backoff (dB)", value=0.0, step=0.5,
+                    help=(
+                        "Saturation point, in dB above this project's reference "
+                        "unit amplitude (an ideal symbol's own magnitude). More "
+                        "negative = saturates more aggressively (more visible "
+                        "spectral regrowth); 0 dB already produces noticeable "
+                        "compression since the RRC-shaped envelope's peaks "
+                        "routinely exceed that reference."
+                    ),
+                )
+            with pa_col2:
+                pa_smoothness = st.number_input(
+                    "Knee smoothness", min_value=0.1, value=3.0, step=0.5,
+                    help="Rapp model knee sharpness: higher = sharper transition from linear to saturated.",
+                )
+            pa_am_pm_deg_per_db = st.number_input(
+                "AM-PM conversion (deg/dB)", value=0.0, step=0.5,
+                help="Phase shift per dB of AM-AM compression -- the same figure real TWTA/SSPA datasheets quote. 0 disables it.",
+            )
+
         active = []
         if freq_offset_hz != 0:
             active.append(f"{freq_offset_hz:+.0f} Hz offset")
-        if iq_gain_imbalance_db != 0 or iq_phase_imbalance_deg != 0:
-            active.append(f"IQ imbalance {iq_gain_imbalance_db:+.2f} dB / {iq_phase_imbalance_deg:+.2f}°")
         if phase_noise_linewidth_hz > 0:
             active.append(f"{phase_noise_linewidth_hz:.0f} Hz phase noise linewidth")
+        if iq_gain_imbalance_db != 0 or iq_phase_imbalance_deg != 0:
+            active.append(f"IQ imbalance {iq_gain_imbalance_db:+.2f} dB / {iq_phase_imbalance_deg:+.2f}°")
+        if enable_pa:
+            pa_desc = f"PA backoff {pa_backoff_db:+.1f} dB (smoothness {pa_smoothness:.1f})"
+            if pa_am_pm_deg_per_db != 0:
+                pa_desc += f", AM-PM {pa_am_pm_deg_per_db:.1f} deg/dB"
+            active.append(pa_desc)
         st.caption("Active: " + ", ".join(active) if active else "Enabled, but all values are still 0 -- no effect yet.")
 
 # --------------------------------------------------------------------------
@@ -610,6 +660,9 @@ params = ChainParams(
     iq_phase_imbalance_deg=float(iq_phase_imbalance_deg),
     phase_noise_linewidth_hz=float(phase_noise_linewidth_hz),
     impairment_seed=int(impairment_seed),
+    pa_backoff_db=float(pa_backoff_db) if enable_pa else None,
+    pa_smoothness=float(pa_smoothness),
+    pa_am_pm_deg_per_db=float(pa_am_pm_deg_per_db),
 )
 
 panel = st.container(border=True)
@@ -649,7 +702,7 @@ with panel:
         chip(f"{modulation} GRAY" if modulation == "QPSK" else modulation, True),
         chip(f"RRC &alpha;={rrc_alpha:.2f}", True),
         chip("TX IMPAIR", freq_offset_hz != 0 or iq_gain_imbalance_db != 0
-             or iq_phase_imbalance_deg != 0 or phase_noise_linewidth_hz > 0),
+             or iq_phase_imbalance_deg != 0 or phase_noise_linewidth_hz > 0 or enable_pa),
     ]) + '</div>'
     st.markdown(stages_html, unsafe_allow_html=True)
 
