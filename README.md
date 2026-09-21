@@ -191,7 +191,12 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
    constellation smearing from a real transmitter LO. All three are applied
    deterministically (seeded via `--impairment-seed`) and carry their state
    correctly across `export_chain()`'s batches, exactly like every other
-   stage in this chain.
+   stage in this chain. The GUI's live "QPSK constellation" plot reflects
+   them: it samples the actual (possibly impaired) IQ through a matched RRC
+   filter (`pulse_shaping.matched_filter_sample()`), not the ideal
+   pre-pulse-shaping symbols -- e.g. a nonzero phase noise linewidth visibly
+   spreads the 4 QPSK points into a ring (constant-magnitude phase
+   rotation), rather than always showing a perfect, unaffected constellation.
 10. **Normalization**: the final signal is scaled to a configurable
     normalized peak amplitude (default 0.9 on a [-1,+1] scale), to leave
     headroom and prevent saturation/clipping during RF playback.

@@ -20,6 +20,7 @@ import streamlit as st
 
 from ccsds_chain.mapping import BITS_PER_SYMBOL
 from ccsds_chain.pipeline import ASM, ChainParams, export_chain, run_chain
+from ccsds_chain.pulse_shaping import matched_filter_sample, rrc_taps
 from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
 
@@ -746,9 +747,17 @@ with panel:
         )
 
     with side_col:
-        n_preview = min(3000, len(result.symbols))
-        idx = np.linspace(0, len(result.symbols) - 1, n_preview).astype(int)
-        sub = result.symbols[idx]
+        # Sampled from the actual (post-impairment) IQ through a matched RRC
+        # filter, not from ChainResult.symbols -- symbols are fixed before
+        # pulse shaping/impairments are ever applied, so plotting them would
+        # always show a perfect constellation regardless of any Transmitter
+        # Impairments setting. See pulse_shaping.matched_filter_sample().
+        decision_points = matched_filter_sample(
+            result.iq, len(result.symbols), int(sps), rrc_taps(rrc_alpha, rrc_span, int(sps)),
+        )
+        n_preview = min(3000, len(decision_points))
+        idx = np.linspace(0, len(decision_points) - 1, n_preview).astype(int)
+        sub = decision_points[idx]
         fig_const = go.Figure()
         fig_const.add_trace(go.Scattergl(
             x=sub.real, y=sub.imag, mode="markers",
