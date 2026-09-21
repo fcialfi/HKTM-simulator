@@ -114,6 +114,23 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
      real uploaded Transfer Frame file (it would overwrite the first 6
      bytes of real data with a synthetic header) -- see
      `ccsds_chain/transfer_frame.py`.
+
+     `--corrupt-rs-symbols` (or, in the GUI, "Inject controlled RS symbol
+     errors") deterministically flips an exact number of RS symbols within
+     one interleaved codeword (`--corrupt-codeword-index`) of chosen CADUs
+     (`--corrupt-cadu-indices` and/or `--corrupt-vc`, the latter requiring
+     `--vcid-list`). This is complementary to a replayer's AWGN: a real
+     noise sweep gives a proper statistical BER/FER-vs-Eb/N0 curve, but
+     can't guarantee hitting a precise per-codeword error count, which
+     makes boundary-testing a receiver's RS decoder against its declared
+     correction capability E impractical that way -- exactly E symbol
+     errors in one codeword must still decode perfectly, E+1 must fail (or
+     be flagged), never silently miscorrect. Combined with `--vcid-list`
+     and `--corrupt-vc`, it also validates that a receiver's per-Virtual-
+     Channel FER accounting attributes injected errors to the right
+     channel and leaves the others untouched. Requires an actual RS-coded
+     region to corrupt (`--no-rs` not set, or `--input-format cadu`,
+     already RS-coded by construction).
 2. **Reed-Solomon**: RS(255,223) with E=16 (default) or RS(255,239) with
    E=8, interleaving at a selectable depth I=1,2,3,4,5,8 (byte `i` goes into
    sub-stream `i mod I`). CCSDS-native implementation (not a generic RS
@@ -232,6 +249,14 @@ python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # for an R
 # 3 Virtual Channels, VC 0 getting twice VC 1/2's share of frames -- for
 # validating a receiver's VC identification/routing
 python generate_signal.py --vcid-list 0,0,1,2 --spacecraft-id 291 -o test4.raw
+
+# Exactly E=16 symbol errors in codeword 0 of CADU #10: must still decode
+# perfectly. Bump to 17 to confirm the receiver correctly flags it instead.
+python generate_signal.py --corrupt-rs-symbols 16 --corrupt-cadu-indices 10 -o test5.raw
+
+# Corrupt every VC1 frame (17 errors, beyond E=16) to check the receiver's
+# per-channel FER report blames VC1 alone, leaving VC0/VC2 clean
+python generate_signal.py --vcid-list 0,1,2 --corrupt-rs-symbols 17 --corrupt-vc 1 -o test6.raw
 
 python verify_spectrum.py output/qpsk_ccsds_....iq --plot spectrum.png
 ```

@@ -107,6 +107,29 @@ def build_cli():
     p.add_argument("--spacecraft-id", type=int, default=0x123,
                     help="10-bit Spacecraft ID (0-1023) for the synthetic primary header "
                          "when --vcid-list is set; otherwise unused")
+    p.add_argument("--corrupt-rs-symbols", type=int, default=0,
+                    help="deterministically flip exactly this many RS symbols within one "
+                         "interleaved codeword (--corrupt-codeword-index) of each targeted "
+                         "CADU (--corrupt-cadu-indices and/or --corrupt-vc), to boundary-test "
+                         "a receiver's RS decoder against its declared correction capability "
+                         "E (--rs-e): E errors must still decode perfectly, E+1 must fail -- "
+                         "an exact, reproducible per-codeword error count a replayer's AWGN "
+                         "can't guarantee hitting. Needs --no-rs NOT set (or --input-format "
+                         "cadu, already RS-coded); default: 0 (disabled)")
+    p.add_argument("--corrupt-codeword-index", type=int, default=0,
+                    help="which of the --interleave-depth interleaved RS codewords to target "
+                         "(0-based); only used with --corrupt-rs-symbols")
+    p.add_argument("--corrupt-cadu-indices", type=str, default=None,
+                    help="comma-separated 0-based CADU indices to corrupt, e.g. '0,5,10'; "
+                         "combines with --corrupt-vc (either match corrupts that CADU) -- at "
+                         "least one of the two is required with --corrupt-rs-symbols")
+    p.add_argument("--corrupt-vc", type=int, default=None,
+                    help="corrupt every CADU assigned to this Virtual Channel ID (requires "
+                         "--vcid-list) -- e.g. to verify a receiver's per-VC FER accounting "
+                         "attributes errors to the right channel only")
+    p.add_argument("--corrupt-seed", type=int, default=777,
+                    help="seed for which symbol positions/values get flipped -- deterministic "
+                         "and reproducible across runs")
     p.add_argument("--dtype", choices=["float32", "int16"], default=OUTPUT_DTYPE,
                     help="IQ sample format for the output file; int16 is the RF-Catcher "
                          "format (little-endian, 12 significant bits, range [-2048, 2047])")
@@ -133,6 +156,16 @@ def main():
             raise SystemExit(f"--vcid-list: invalid pattern {args.vcid_list!r} ({e}); "
                               "expected comma-separated integers 0-7, e.g. '0,1,2'")
 
+    corrupt_cadu_indices = None
+    if args.corrupt_cadu_indices is not None:
+        try:
+            corrupt_cadu_indices = [int(v.strip()) for v in args.corrupt_cadu_indices.split(",") if v.strip() != ""]
+            if not corrupt_cadu_indices:
+                raise ValueError("list is empty")
+        except ValueError as e:
+            raise SystemExit(f"--corrupt-cadu-indices: invalid list {args.corrupt_cadu_indices!r} ({e}); "
+                              "expected comma-separated integers, e.g. '0,5,10'")
+
     params = ChainParams(
         modulation=args.modulation,
         encoding=ENCODING,
@@ -156,6 +189,11 @@ def main():
         seed=args.seed,
         vcid_list=vcid_list,
         spacecraft_id=args.spacecraft_id,
+        corrupt_rs_symbols=args.corrupt_rs_symbols,
+        corrupt_codeword_index=args.corrupt_codeword_index,
+        corrupt_cadu_indices=corrupt_cadu_indices,
+        corrupt_vc=args.corrupt_vc,
+        corrupt_seed=args.corrupt_seed,
     )
     is_cadu_input = params.input_format == "cadu"
     unit_bytes = len(params.asm) + params.rs_n * params.interleave_depth if is_cadu_input else params.rs_k * params.interleave_depth
@@ -166,6 +204,14 @@ def main():
     if params.vcid_list is not None:
         print(f"       -> synthetic Transfer Frame headers: spacecraft_id=0x{params.spacecraft_id:03X}, "
               f"VCID pattern {params.vcid_list} (round-robined)")
+    if params.corrupt_rs_symbols > 0:
+        target = []
+        if params.corrupt_cadu_indices is not None:
+            target.append(f"CADU indices {params.corrupt_cadu_indices}")
+        if params.corrupt_vc is not None:
+            target.append(f"VC{params.corrupt_vc}")
+        print(f"       -> deterministic corruption: {params.corrupt_rs_symbols} symbol(s) flipped in "
+              f"codeword {params.corrupt_codeword_index} of {' and '.join(target)}")
     if is_cadu_input:
         print("[2/9] RS SKIPPED -- input already contains complete, RS-encoded CADUs")
         print(f"[3/9] Pseudo-randomizer CCSDS ({params.randomizer}, excludes ASM) -- re-applied to the "

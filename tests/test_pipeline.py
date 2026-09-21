@@ -257,6 +257,158 @@ class TestVirtualChannelFraming:
         assert out_path.read_bytes() == expected
 
 
+class TestDeterministicCorruption:
+    """`corrupt_rs_symbols` flips an exact, reproducible number of RS
+    symbols within one interleaved codeword of targeted CADUs -- for
+    boundary-testing a receiver's RS decoder against its declared
+    correction capability E, and for validating per-VC FER accounting --
+    complementary to a replayer's AWGN, which can't guarantee hitting a
+    precise per-codeword error count."""
+
+    def test_disabled_by_default(self):
+        result = run_chain(_small_params())
+        assert result.meta["corrupt_rs_symbols"] is None
+
+    def test_rejected_without_rs_coded_region(self):
+        with pytest.raises(ValueError, match="RS-coded region"):
+            run_chain(_small_params(fec_rs=False, corrupt_rs_symbols=1, corrupt_cadu_indices=[0]))
+
+    def test_rejected_for_out_of_range_symbol_count(self):
+        with pytest.raises(ValueError, match="corrupt_rs_symbols"):
+            run_chain(_small_params(corrupt_rs_symbols=999, corrupt_cadu_indices=[0]))
+
+    def test_rejected_for_out_of_range_codeword_index(self):
+        with pytest.raises(ValueError, match="corrupt_codeword_index"):
+            run_chain(_small_params(corrupt_rs_symbols=1, corrupt_cadu_indices=[0], corrupt_codeword_index=5))
+
+    def test_rejected_without_a_target(self):
+        with pytest.raises(ValueError, match="corrupt_cadu_indices"):
+            run_chain(_small_params(corrupt_rs_symbols=1))
+
+    def test_corrupt_vc_rejected_without_vcid_list(self):
+        with pytest.raises(ValueError, match="vcid_list"):
+            run_chain(_small_params(corrupt_rs_symbols=1, corrupt_vc=0))
+
+    def test_corrupt_vc_rejected_for_out_of_range_vcid(self):
+        with pytest.raises(ValueError, match="0-7"):
+            run_chain(_small_params(vcid_list=[0], corrupt_rs_symbols=1, corrupt_vc=8))
+
+    def test_exactly_e_errors_still_decodes_perfectly(self):
+        """The whole point of the feature: hitting the RS decoder's
+        declared correction capability exactly, on demand -- something a
+        statistical noise sweep can't reliably guarantee."""
+        from ccsds_chain.reed_solomon import rs_decode_interleaved
+        from ccsds_chain.utils import bits_to_bytes
+
+        p = _small_params(n_cadu=1, rs_e=16, rs_n=255, interleave_depth=5,
+                           corrupt_rs_symbols=16, corrupt_codeword_index=0, corrupt_cadu_indices=[0])
+        prep = pipeline._prepare_payload(p)
+        cadu = bits_to_bytes(pipeline._cadu_bits(p, prep, 0))
+        rs_region = cadu[len(p.asm):]
+        decoded = rs_decode_interleaved(rs_region, p.rs_k, p.rs_n, p.interleave_depth)
+        assert decoded == prep.payload[:prep.frame_bytes]
+
+    def test_e_plus_one_errors_is_uncorrectable(self):
+        from ccsds_chain.reed_solomon import rs_decode_interleaved
+        from ccsds_chain.utils import bits_to_bytes
+
+        p = _small_params(n_cadu=1, rs_e=16, rs_n=255, interleave_depth=5,
+                           corrupt_rs_symbols=17, corrupt_codeword_index=0, corrupt_cadu_indices=[0])
+        prep = pipeline._prepare_payload(p)
+        cadu = bits_to_bytes(pipeline._cadu_bits(p, prep, 0))
+        rs_region = cadu[len(p.asm):]
+        with pytest.raises(ValueError, match="uncorrectable"):
+            rs_decode_interleaved(rs_region, p.rs_k, p.rs_n, p.interleave_depth)
+
+    def test_only_targeted_cadu_indices_are_corrupted(self):
+        from ccsds_chain.reed_solomon import rs_decode_interleaved
+        from ccsds_chain.utils import bits_to_bytes
+
+        p = _small_params(n_cadu=4, rs_e=16, rs_n=255, interleave_depth=5,
+                           corrupt_rs_symbols=17, corrupt_codeword_index=0, corrupt_cadu_indices=[2])
+        prep = pipeline._prepare_payload(p)
+        for i in range(4):
+            cadu = bits_to_bytes(pipeline._cadu_bits(p, prep, i))
+            rs_region = cadu[len(p.asm):]
+            if i == 2:
+                with pytest.raises(ValueError, match="uncorrectable"):
+                    rs_decode_interleaved(rs_region, p.rs_k, p.rs_n, p.interleave_depth)
+            else:
+                rs_decode_interleaved(rs_region, p.rs_k, p.rs_n, p.interleave_depth)  # must not raise
+
+    def test_only_targeted_codeword_is_corrupted(self):
+        """The other interleave_depth-1 codewords in the same CADU stay
+        clean -- corruption is scoped to corrupt_codeword_index alone."""
+        from ccsds_chain.reed_solomon import from_dual_basis, rs_decode_codeword
+        from ccsds_chain.utils import bits_to_bytes
+
+        p = _small_params(n_cadu=1, rs_e=16, rs_n=255, interleave_depth=5,
+                           corrupt_rs_symbols=17, corrupt_codeword_index=0, corrupt_cadu_indices=[0])
+        prep = pipeline._prepare_payload(p)
+        cadu = bits_to_bytes(pipeline._cadu_bits(p, prep, 0))
+        rs_region = cadu[len(p.asm):]
+        for j in range(1, p.interleave_depth):
+            codeword_conventional = bytes(from_dual_basis(b) for b in rs_region[j::p.interleave_depth])
+            rs_decode_codeword(codeword_conventional, p.rs_e)  # must not raise
+
+    def test_corrupt_vc_targets_only_matching_virtual_channel(self):
+        from ccsds_chain.reed_solomon import rs_decode_interleaved
+        from ccsds_chain.transfer_frame import vcid_schedule_counts
+        from ccsds_chain.utils import bits_to_bytes
+
+        pattern = [0, 1, 2]
+        p = _small_params(n_cadu=6, rs_e=16, rs_n=255, interleave_depth=5,
+                           vcid_list=pattern, spacecraft_id=0x123,
+                           corrupt_rs_symbols=17, corrupt_codeword_index=0, corrupt_vc=1)
+        prep = pipeline._prepare_payload(p)
+        for i in range(6):
+            cadu = bits_to_bytes(pipeline._cadu_bits(p, prep, i))
+            rs_region = cadu[len(p.asm):]
+            vcid, _ = vcid_schedule_counts(pattern, i)
+            if vcid == 1:
+                with pytest.raises(ValueError, match="uncorrectable"):
+                    rs_decode_interleaved(rs_region, p.rs_k, p.rs_n, p.interleave_depth)
+            else:
+                rs_decode_interleaved(rs_region, p.rs_k, p.rs_n, p.interleave_depth)  # must not raise
+
+    def test_deterministic_across_independent_calls(self):
+        p = _small_params(n_cadu=1, corrupt_rs_symbols=16, corrupt_cadu_indices=[0])
+        prep = pipeline._prepare_payload(p)
+        bits_a = pipeline._cadu_bits(p, prep, 0)
+        bits_b = pipeline._cadu_bits(p, prep, 0)
+        assert np.array_equal(bits_a, bits_b)
+
+    def test_meta_reports_corruption_settings(self):
+        p = _small_params(corrupt_rs_symbols=5, corrupt_codeword_index=2, corrupt_cadu_indices=[0, 1])
+        result = run_chain(p)
+        assert result.meta["corrupt_rs_symbols"] == 5
+        assert result.meta["corrupt_codeword_index"] == 2
+        assert result.meta["corrupt_cadu_indices"] == [0, 1]
+
+    def test_export_chain_matches_run_chain_with_corruption(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "_EXPORT_BATCH_TARGET_BYTES", 1)  # forces batch_n_cadu == 1
+        p = _small_params(n_cadu=6, corrupt_rs_symbols=16, corrupt_cadu_indices=[1, 3, 5])
+        expected = pack_iq_interleaved(normalize_peak(run_chain(p).iq, peak=0.9), "int16")
+
+        out_path = tmp_path / "out.raw"
+        export_chain(p, str(out_path), output_dtype="int16", peak=0.9)
+        assert out_path.read_bytes() == expected
+
+    def test_works_with_cadu_input(self):
+        """corrupt_rs_symbols also applies to input_format='cadu' (already
+        RS-coded by construction, per _validate_chain_params)."""
+        from ccsds_chain.reed_solomon import rs_decode_interleaved
+        from ccsds_chain.utils import bits_to_bytes
+
+        p = _small_params(n_cadu=1, input_format="cadu", rs_e=16, rs_n=255, interleave_depth=5,
+                           corrupt_rs_symbols=17, corrupt_codeword_index=0, corrupt_cadu_indices=[0])
+        prep = pipeline._prepare_payload(p)
+        cadu = bits_to_bytes(pipeline._cadu_bits(p, prep, 0))
+        rs_region = cadu[len(p.asm):]
+        with pytest.raises(ValueError, match="uncorrectable"):
+            rs_decode_interleaved(rs_region, p.rs_k, p.rs_n, p.interleave_depth)
+
+
 class TestExportChainMatchesRunChain:
     """export_chain()'s own docstring claim: for int16 output, batched
     streaming export is exactly byte-for-byte identical to packing
