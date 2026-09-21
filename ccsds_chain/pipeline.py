@@ -63,6 +63,36 @@ class ChainParams:
                                          # file, which already carries its own real header.
     spacecraft_id: int = 0x123  # 10-bit SCID (0-1023) used in the synthetic primary header
                                  # above, when vcid_list is set; otherwise unused.
+    corrupt_rs_symbols: int = 0  # 0 = disabled (default). Otherwise, the exact number of RS
+                                  # symbols (bytes) to flip within one interleaved codeword
+                                  # (see corrupt_codeword_index) of every targeted CADU (see
+                                  # corrupt_cadu_indices/corrupt_vc below) -- deterministic,
+                                  # exact-per-codeword-count error injection, unlike a
+                                  # replayer's AWGN (which characterizes statistical BER/FER
+                                  # vs Eb/N0 well, but can't guarantee hitting a precise error
+                                  # count in one specific codeword). Meant for boundary-testing
+                                  # a receiver's RS decoder against its declared correction
+                                  # capability E (rs_e): exactly E symbol errors must still
+                                  # decode perfectly; E+1 must fail (or be flagged), never
+                                  # silently miscorrect. Needs an actual RS-coded region to
+                                  # corrupt: requires fec_rs=True, or input_format="cadu"
+                                  # (already RS-coded by construction).
+    corrupt_codeword_index: int = 0  # which of the `interleave_depth` interleaved RS
+                                      # codewords to target (0-based); only meaningful when
+                                      # corrupt_rs_symbols > 0.
+    corrupt_cadu_indices: list[int] | None = None  # explicit 0-based CADU indices to corrupt.
+                                                     # Combines with corrupt_vc (either match
+                                                     # corrupts that CADU); at least one of the
+                                                     # two must be set when corrupt_rs_symbols > 0.
+    corrupt_vc: int | None = None  # corrupt every CADU assigned to this Virtual Channel ID
+                                    # (requires vcid_list) -- e.g. to verify a receiver's
+                                    # per-VC FER accounting attributes errors to the right
+                                    # channel and leaves other VCs' counts untouched.
+    corrupt_seed: int = 777  # seed for choosing which symbol positions (and XOR values) get
+                              # flipped -- deterministic and reproducible across runs, and
+                              # combined with each CADU's own index (never carried as mutable
+                              # state), so run_chain() and export_chain() (batched/streaming)
+                              # always compute the exact same corruption for the same CADU.
 
     @property
     def rs_k(self) -> int:
@@ -121,6 +151,11 @@ class _PayloadPrep:
     # for meta/UI reporting only -- not used by any encoding logic.
     cadu_wrapper_min_bytes: Optional[int] = None
     cadu_wrapper_max_bytes: Optional[int] = None
+    # Precomputed once from ChainParams.corrupt_cadu_indices (a plain list,
+    # the convenient public/CLI/GUI shape) so _cadu_bits()'s per-CADU
+    # membership check -- run for every CADU, including ones never
+    # corrupted -- is O(1) instead of an O(len(list)) scan each time.
+    corrupt_cadu_index_set: Optional[frozenset] = None
 
 
 def _validate_chain_params(p: ChainParams) -> None:
@@ -146,6 +181,33 @@ def _validate_chain_params(p: ChainParams) -> None:
                 raise ValueError(f"vcid_list values must be 3-bit Virtual Channel IDs (0-7), got {vcid}")
         if not (0 <= p.spacecraft_id < 1024):
             raise ValueError(f"spacecraft_id must fit in 10 bits (0-1023), got {p.spacecraft_id}")
+    if p.corrupt_rs_symbols > 0:
+        if not p.fec_rs and p.input_format != "cadu":
+            raise ValueError(
+                "corrupt_rs_symbols needs an actual RS-coded region to corrupt: enable "
+                "fec_rs, or use input_format='cadu' (already RS-coded by construction)"
+            )
+        if not (0 <= p.corrupt_rs_symbols <= p.rs_n):
+            raise ValueError(f"corrupt_rs_symbols must be between 0 and rs_n={p.rs_n}, got {p.corrupt_rs_symbols}")
+        if not (0 <= p.corrupt_codeword_index < p.interleave_depth):
+            raise ValueError(
+                f"corrupt_codeword_index must be a valid interleaved codeword index "
+                f"(0-{p.interleave_depth - 1}), got {p.corrupt_codeword_index}"
+            )
+        if p.corrupt_cadu_indices is None and p.corrupt_vc is None:
+            raise ValueError(
+                "corrupt_rs_symbols requires corrupt_cadu_indices and/or corrupt_vc, to say "
+                "which CADUs to corrupt"
+            )
+        if p.corrupt_vc is not None:
+            if p.vcid_list is None:
+                raise ValueError("corrupt_vc requires vcid_list to be set (it targets CADUs by their assigned Virtual Channel)")
+            if not (0 <= p.corrupt_vc < 8):
+                raise ValueError(f"corrupt_vc must be a 3-bit Virtual Channel ID (0-7), got {p.corrupt_vc}")
+        if p.corrupt_cadu_indices is not None:
+            for idx in p.corrupt_cadu_indices:
+                if idx < 0:
+                    raise ValueError(f"corrupt_cadu_indices must be non-negative, got {idx}")
 
 
 def _unit_bytes(p: ChainParams) -> tuple:
@@ -271,13 +333,59 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
     # for why CADU input isn't assumed to already be scrambled.
     pn = pn_sequence(rs_block_bytes * 8, p.randomizer) if p.randomizer != "none" else None
 
+    corrupt_cadu_index_set = frozenset(p.corrupt_cadu_indices) if p.corrupt_cadu_indices is not None else None
+
     return _PayloadPrep(payload=payload, unit_bytes=unit_bytes, frame_bytes=frame_bytes,
                          rs_block_bytes=rs_block_bytes, is_cadu_input=is_cadu_input,
                          has_real_source=has_real_source, n_synced_cadu=n_synced_cadu,
                          sync_skipped_bytes=sync_skipped_bytes, asm_bits=asm_bits, pn=pn,
+                         corrupt_cadu_index_set=corrupt_cadu_index_set,
                          cadu_positions=cadu_positions, raw_synced=raw_synced,
                          cadu_wrapper_min_bytes=cadu_wrapper_min_bytes,
                          cadu_wrapper_max_bytes=cadu_wrapper_max_bytes)
+
+
+def _should_corrupt(p: ChainParams, prep: _PayloadPrep, i: int, vcid: Optional[int]) -> bool:
+    """Whether CADU `i` (assigned to Virtual Channel `vcid`, or None outside
+    "transfer_frame" + vcid_list) is one of the CADUs ChainParams.
+    corrupt_rs_symbols targets -- see corrupt_cadu_indices/corrupt_vc."""
+    if p.corrupt_rs_symbols <= 0:
+        return False
+    if prep.corrupt_cadu_index_set is not None and i in prep.corrupt_cadu_index_set:
+        return True
+    return p.corrupt_vc is not None and vcid == p.corrupt_vc
+
+
+def _corrupt_rs_region(rs_region: bytes, p: ChainParams, i: int) -> bytes:
+    """Flip exactly `p.corrupt_rs_symbols` distinct symbols of interleaved
+    codeword `p.corrupt_codeword_index` within `rs_region` (the RS-coded
+    byte block: rs_n*interleave_depth bytes, substream j = rs_region[j::
+    interleave_depth], same layout reed_solomon.rs_encode_interleaved()
+    produces/consumes) -- an exact, reproducible per-codeword error count,
+    for boundary-testing a receiver's RS decoder (see ChainParams.
+    corrupt_rs_symbols).
+
+    Deterministic per CADU index `i` and ChainParams.corrupt_seed alone (no
+    state carried between calls), so run_chain() and export_chain()
+    (batched/streaming) always compute the same corruption for the same
+    CADU regardless of batching.
+
+    Applied here, before scrambling/ASM, rather than on the final
+    transmitted bits: XOR corruption commutes with the pseudo-randomizer's
+    own XOR scrambling (each is just XOR-ing a fixed mask over the same
+    bytes), so the two orderings produce byte-for-byte identical output --
+    this is simply the more convenient place to work in exact RS symbol
+    positions.
+    """
+    depth = p.interleave_depth
+    rng = np.random.default_rng((p.corrupt_seed, i))
+    codeword = np.frombuffer(rs_region, dtype=np.uint8)[p.corrupt_codeword_index::depth].copy()
+    positions = rng.choice(len(codeword), size=p.corrupt_rs_symbols, replace=False)
+    masks = rng.integers(1, 256, size=p.corrupt_rs_symbols)  # never 0: guarantees each flipped symbol actually changes
+    codeword[positions] ^= masks.astype(np.uint8)
+    out = bytearray(rs_region)
+    out[p.corrupt_codeword_index::depth] = codeword.tobytes()
+    return bytes(out)
 
 
 def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
@@ -301,6 +409,9 @@ def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
             # Pseudo-random test payload (no real source): fixed-stride,
             # exactly as generated.
             cadu = prep.payload[i * prep.unit_bytes:(i + 1) * prep.unit_bytes]
+        if _should_corrupt(p, prep, i, vcid=None):
+            asm_len = len(p.asm)
+            cadu = cadu[:asm_len] + _corrupt_rs_region(cadu[asm_len:], p, i)
         bits = bytes_to_bits(cadu)
         if prep.pn is not None:
             # Scramble only the RS-coded region, never the ASM -- see
@@ -310,6 +421,7 @@ def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
             bits[asm_bit_len:] = np.bitwise_xor(bits[asm_bit_len:], prep.pn)
         return bits
     frame = prep.payload[i * prep.frame_bytes:(i + 1) * prep.frame_bytes]
+    vcid = None
     if p.vcid_list is not None:
         # Overwrite the first PRIMARY_HEADER_BYTES of the frame with a real
         # CCSDS TM primary header carrying this frame's assigned VCID (see
@@ -326,6 +438,8 @@ def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
         frame = header + frame[PRIMARY_HEADER_BYTES:]
     rs_block = (rs_encode_interleaved(frame, p.rs_k, p.rs_n, p.interleave_depth)
                 if p.fec_rs else frame)
+    if _should_corrupt(p, prep, i, vcid):
+        rs_block = _corrupt_rs_region(rs_block, p, i)
     rs_bits = bytes_to_bits(rs_block)
     if prep.pn is not None:
         rs_bits = np.bitwise_xor(rs_bits, prep.pn)
@@ -358,6 +472,10 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "n_cadu": p.n_cadu,
         "vcid_list": p.vcid_list,
         "spacecraft_id": p.spacecraft_id if p.vcid_list is not None else None,
+        "corrupt_rs_symbols": p.corrupt_rs_symbols if p.corrupt_rs_symbols > 0 else None,
+        "corrupt_codeword_index": p.corrupt_codeword_index if p.corrupt_rs_symbols > 0 else None,
+        "corrupt_cadu_indices": p.corrupt_cadu_indices if p.corrupt_rs_symbols > 0 else None,
+        "corrupt_vc": p.corrupt_vc if p.corrupt_rs_symbols > 0 else None,
     }
 
 

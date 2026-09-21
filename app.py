@@ -476,6 +476,57 @@ with st.sidebar:
                 ),
             )
 
+corrupt_rs_symbols = 0
+corrupt_codeword_index = 0
+corrupt_cadu_indices = None
+corrupt_vc = None
+corrupt_seed = 777
+if fec_rs or is_cadu_input:
+    st.markdown("### Deterministic Error Injection")
+    enable_corruption = st.checkbox(
+        "Inject controlled RS symbol errors",
+        help=(
+            "Deterministically flips an exact number of RS symbols within one "
+            "interleaved codeword of chosen CADUs -- for boundary-testing a "
+            "receiver's RS decoder against its declared correction capability E "
+            "(E errors must still decode perfectly, E+1 must fail/be flagged), "
+            "or for validating that a receiver's per-Virtual-Channel FER "
+            "accounting attributes errors to the right channel and leaves "
+            "others untouched. Complementary to a replayer's AWGN, which "
+            "characterizes statistical BER/FER vs Eb/N0 well but can't "
+            "guarantee hitting a precise per-codeword error count."
+        ),
+    )
+    if enable_corruption:
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            corrupt_rs_symbols = st.number_input(
+                "Symbols to flip per codeword", min_value=1, max_value=255, value=int(rs_e), step=1,
+                help=f"Try {rs_e} (the declared E) to confirm it still decodes, and {rs_e + 1} to confirm it correctly fails.",
+            )
+        with cc2:
+            corrupt_codeword_index = st.number_input(
+                "Codeword index", min_value=0, max_value=int(interleave_depth) - 1, value=0, step=1,
+                help="Which of the interleave_depth interleaved codewords to corrupt (0-based).",
+            )
+        target_mode = (
+            st.radio("Target", ["Specific CADU indices", "Virtual Channel"], horizontal=True)
+            if vcid_list is not None else "Specific CADU indices"
+        )
+        if target_mode == "Specific CADU indices":
+            indices_text = st.text_input("CADU indices (comma-separated, 0-based)", value="0")
+            try:
+                corrupt_cadu_indices = [int(v.strip()) for v in indices_text.split(",") if v.strip() != ""]
+                if not corrupt_cadu_indices:
+                    raise ValueError("list is empty")
+            except ValueError as e:
+                st.error(f"Invalid CADU index list: {e}. Use comma-separated integers, e.g. '0, 5, 10'.")
+                st.stop()
+            st.caption(f"Corrupting {corrupt_rs_symbols} symbol(s) in codeword {corrupt_codeword_index} of CADU(s) {corrupt_cadu_indices}")
+        else:
+            corrupt_vc = st.number_input("Virtual Channel ID", min_value=0, max_value=7, value=vcid_list[0], step=1)
+            st.caption(f"Corrupting {corrupt_rs_symbols} symbol(s) in codeword {corrupt_codeword_index} of every VC{corrupt_vc} CADU")
+
 # --------------------------------------------------------------------------
 # Build params & run chain
 # --------------------------------------------------------------------------
@@ -500,6 +551,11 @@ params = ChainParams(
     seed=int(seed),
     vcid_list=vcid_list,
     spacecraft_id=int(spacecraft_id),
+    corrupt_rs_symbols=int(corrupt_rs_symbols),
+    corrupt_codeword_index=int(corrupt_codeword_index),
+    corrupt_cadu_indices=corrupt_cadu_indices,
+    corrupt_vc=int(corrupt_vc) if corrupt_vc is not None else None,
+    corrupt_seed=int(corrupt_seed),
 )
 
 panel = st.container(border=True)
@@ -531,6 +587,7 @@ with panel:
     stages_html = '<div class="stage-row">' + '<span class="arrow">&rarr;</span>'.join([
         chip("CADU (in)" if is_cadu_input else ("PAYLOAD +VC" if vcid_list is not None else "PAYLOAD"), True),
         chip(f"RS(255,{rs_k}) I={interleave_depth}" + (" [in CADU]" if is_cadu_input else ""), fec_rs and not is_cadu_input),
+        chip(f"+{corrupt_rs_symbols} ERR", corrupt_rs_symbols > 0),
         chip(randomizer_label.split(" ")[0].upper(), randomizer != "none"),
         chip("+ASM" + (" [in CADU]" if is_cadu_input else ""), not is_cadu_input),
         chip(f"CONV K=7 r={conv_rate}", fec_conv),
