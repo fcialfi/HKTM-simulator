@@ -179,22 +179,28 @@ with st.sidebar:
             "uncoded data: RS, the pseudo-randomizer and the ASM are all "
             "applied further down to build the CADUs from it. 'CADU' means "
             "the bytes are already complete CADUs (ASM + RS-encoded "
-            "codeblock, already pseudo-randomized if that's how they were "
-            "built) -- e.g. captured or previously generated CADUs -- so RS, "
-            "the randomizer and the ASM prepend are all skipped to avoid "
-            "double-encoding a second layer on top; only the convolutional "
-            "stage below (if enabled) is still applied, exactly as it would "
-            "be by a physical coder sitting downstream of an already-formed "
-            "CADU stream."
+            "codeblock) -- e.g. captured or previously generated CADUs -- so "
+            "RS and the ASM prepend are skipped, to avoid double-encoding a "
+            "second layer on top; only the convolutional stage below (if "
+            "enabled) is still applied, exactly as it would be by a physical "
+            "coder sitting downstream of an already-formed CADU stream. The "
+            "pseudo-randomizer below is NOT assumed to already be applied: "
+            "set it to match how the source was actually built -- many "
+            "captured/decoded CADU sources (e.g. an instrument that does its "
+            "own frame sync) hand back already-descrambled bytes, which need "
+            "scrambling here again before transmission, or a real receiver's "
+            "own descrambler will corrupt every frame."
         ),
     )
     is_cadu_input = input_format_label.startswith("CADU")
     input_format = "cadu" if is_cadu_input else "transfer_frame"
     if is_cadu_input:
         st.caption(
-            "CADU input: RS encoding, pseudo-randomizer and ASM prepend below "
-            "are skipped (the uploaded CADUs already carry them). RS/interleave "
-            "settings are still used to know each CADU's byte length."
+            "CADU input: RS encoding and ASM prepend below are skipped (the "
+            "uploaded CADUs already carry them). RS/interleave settings are "
+            "still used to know each CADU's byte length. The pseudo-"
+            "randomizer below still applies if enabled -- set it to match "
+            "how these CADUs were actually built, not left at its default."
         )
 
     st.markdown("### FEC")
@@ -261,15 +267,21 @@ with st.sidebar:
 
     randomizer_label = st.selectbox(
         "Pseudo-randomizer", ["Long (131071-bit)", "Short (255-bit, legacy)", "None"],
-        disabled=is_cadu_input,
         help=(
             "CCSDS section 10: scrambles the RS-coded data (never the ASM) to "
             "guarantee bit transitions, avoid spectral lines, and aid receiver "
             "acquisition. 'Long' is the current standard default (Issue 5, "
             "2023, managed parameter 12.3); 'Short' is kept only for backward "
             "compatibility with legacy systems."
-            + (" Not re-applied in CADU mode: the input is already randomized "
-               "if that's how the uploaded CADUs were built." if is_cadu_input else "")
+            + (" In CADU mode this is NOT assumed to already be applied to the "
+               "uploaded data: set it to match how these CADUs were actually "
+               "built. 'None' assumes the uploaded bytes are exactly as "
+               "they'd appear on the air right before convolutional coding "
+               "(already scrambled, if that system scrambles at all); pick "
+               "'Long'/'Short' instead if your source hands back already-"
+               "descrambled bytes (common for a capture/decode instrument that "
+               "does its own frame sync) -- otherwise a real receiver's own "
+               "descrambler will corrupt every frame." if is_cadu_input else "")
         ),
     )
     randomizer = {"Long (131071-bit)": "long", "Short (255-bit, legacy)": "short", "None": "none"}[randomizer_label]
@@ -469,7 +481,7 @@ with panel:
     stages_html = '<div class="stage-row">' + '<span class="arrow">&rarr;</span>'.join([
         chip("CADU (in)" if is_cadu_input else "PAYLOAD", True),
         chip(f"RS(255,{rs_k}) I={interleave_depth}" + (" [in CADU]" if is_cadu_input else ""), fec_rs and not is_cadu_input),
-        chip(randomizer_label.split(" ")[0].upper() + (" [in CADU]" if is_cadu_input else ""), randomizer != "none" and not is_cadu_input),
+        chip(randomizer_label.split(" ")[0].upper(), randomizer != "none"),
         chip("+ASM" + (" [in CADU]" if is_cadu_input else ""), not is_cadu_input),
         chip(f"CONV K=7 r={conv_rate}", fec_conv),
         chip("NRZ-L", True),
