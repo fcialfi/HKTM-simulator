@@ -110,3 +110,35 @@ class RRCPulseShaper:
         out = self._tail
         self._tail = np.zeros(len(self.taps) - 1, dtype=complex)
         return out
+
+
+def matched_filter_sample(iq: np.ndarray, n_symbols: int, sps: int, taps: np.ndarray) -> np.ndarray:
+    """Applies a matched (receive-side) RRC filter to `iq` and returns its
+    symbol-spaced decision-point samples -- up to `n_symbols` complex
+    values, one per originally transmitted symbol still fully covered by
+    `iq` (a handful near each end are dropped along with the two filter
+    passes' combined group delay, the same way a real matched-filter
+    receiver's own startup/settling would).
+
+    `pulse_shape()`/`RRCPulseShaper` only ever apply the transmit-side RRC
+    once: on its own, `iq` is a square-root-raised-cosine-shaped signal,
+    not the full Nyquist raised-cosine a matched receive filter's cascade
+    forms -- sampling `iq` directly at symbol-spaced instants does *not*
+    recover a clean, ISI-free constellation (confirmed empirically: doing
+    so leaves a large residual even with no impairments applied at all).
+    Convolving again with the same RRC taps (the textbook matched filter
+    for this pulse shape) and sampling at `len(taps) - 1` (the combined
+    group delay of both passes) plus every `sps`-th sample after that
+    recovers the original symbols almost exactly when `iq` carries no
+    impairments -- and, when it does (frequency offset, IQ imbalance,
+    phase noise -- see impairments.py), lets the resulting samples show
+    their actual effect (rotation, skew, smearing) for a receiver-facing
+    view of signal quality, unlike plotting the ideal pre-pulse-shaping
+    `ChainResult.symbols` array (which never reflects any impairment,
+    since impairments are applied to the IQ after those symbols are
+    already fixed)."""
+    matched = np.convolve(iq, taps, mode="full")
+    group_delay = len(taps) - 1
+    idx = group_delay + np.arange(n_symbols) * sps
+    idx = idx[idx < len(matched)]
+    return matched[idx]

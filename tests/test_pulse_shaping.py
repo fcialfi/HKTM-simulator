@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from ccsds_chain.pulse_shaping import RRCPulseShaper, pulse_shape, rrc_taps
+from ccsds_chain.pulse_shaping import RRCPulseShaper, matched_filter_sample, pulse_shape, rrc_taps
 
 
 class TestRRCTaps:
@@ -77,3 +77,82 @@ class TestPulseShapeStreamingEquivalence:
         pulse_shape(symbols, sps, taps, progress_callback=seen.append)
         assert len(seen) > 1
         assert seen[-1] == pytest.approx(1.0)
+
+
+class TestMatchedFilterSample:
+    """A single transmit-side RRC pass (pulse_shape()) does not by itself
+    give a clean, ISI-free constellation at symbol-spaced samples -- only
+    the cascade of transmit + matched receive RRC filters forms the full
+    Nyquist raised-cosine pulse with that property. matched_filter_sample()
+    applies that second (matched) pass so the GUI's constellation plot
+    reflects the actual (possibly impaired) IQ, not just the ideal
+    pre-pulse-shaping symbols."""
+
+    def _random_qpsk_symbols(self, n, seed=1):
+        rng = np.random.default_rng(seed)
+        bits = rng.integers(0, 2, size=(n, 2)) * 2 - 1
+        return (bits[:, 0] + 1j * bits[:, 1]).astype(np.complex128) / np.sqrt(2.0)
+
+    def test_recovers_original_symbols_closely_with_no_impairment(self):
+        sps, span, alpha = 4, 8, 0.35
+        taps = rrc_taps(alpha, span, sps)
+        symbols = self._random_qpsk_symbols(200)
+        iq = pulse_shape(symbols, sps, taps)
+
+        recovered = matched_filter_sample(iq, len(symbols), sps, taps)
+        # Away from the filter's own start/end transient (a handful of
+        # symbols at each edge), recovered points must land close to the
+        # original symbols -- this is the textbook zero-ISI property of a
+        # matched-filter cascade, not an approximation.
+        assert np.allclose(recovered[20:-20], symbols[20:-20], atol=0.05)
+
+    def test_single_rrc_pass_alone_does_not_recover_symbols(self):
+        """The bug this function exists to fix: sampling the transmit-only
+        `iq` directly (no matched filter) at the same symbol-spaced
+        instants leaves a large residual even with zero impairments --
+        confirming the matched filter is doing real work, not a no-op."""
+        sps, span, alpha = 4, 8, 0.35
+        taps = rrc_taps(alpha, span, sps)
+        symbols = self._random_qpsk_symbols(200)
+        iq = pulse_shape(symbols, sps, taps)
+
+        group_delay = (len(taps) - 1) // 2  # single-pass group delay
+        idx = group_delay + np.arange(len(symbols)) * sps
+        idx = idx[idx < len(iq)]
+        unmatched = iq[idx]
+
+        assert np.max(np.abs(unmatched[20:-20] - symbols[20:len(unmatched) - 20])) > 0.3
+
+    def test_output_length_drops_symbols_beyond_the_covered_signal(self):
+        sps, span, alpha = 4, 8, 0.35
+        taps = rrc_taps(alpha, span, sps)
+        symbols = self._random_qpsk_symbols(50)
+        iq = pulse_shape(symbols, sps, taps)
+
+        # Asking for far more symbols than iq actually covers must not
+        # over-run the array -- just return however many decision points
+        # actually fit.
+        recovered = matched_filter_sample(iq, 10_000, sps, taps)
+        assert len(recovered) < 10_000
+        assert len(recovered) > 0
+
+    def test_reflects_a_frequency_offset_as_phase_rotation(self):
+        sps, span, alpha = 4, 8, 0.35
+        symbol_rate = 1_000_000.0
+        sample_rate = symbol_rate * sps
+        taps = rrc_taps(alpha, span, sps)
+        symbols = np.ones(500, dtype=np.complex128) / np.sqrt(2.0)  # constant symbol, easiest to check rotation on
+        iq = pulse_shape(symbols, sps, taps)
+
+        offset_hz = 20_000.0
+        n = np.arange(len(iq))
+        rotated_iq = iq * np.exp(1j * 2 * np.pi * offset_hz * n / sample_rate)
+
+        plain = matched_filter_sample(iq, len(symbols), sps, taps)
+        rotated = matched_filter_sample(rotated_iq, len(symbols), sps, taps)
+
+        # A constant symbol stream's decision points should stay put
+        # without an offset (allowing for edge transient) ...
+        assert np.std(np.angle(plain[20:-20])) < 0.05
+        # ... and visibly spin once one is applied.
+        assert np.std(np.angle(rotated[20:-20])) > 0.5
