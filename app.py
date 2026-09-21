@@ -326,6 +326,8 @@ with st.sidebar:
     payload_source_bytes = None
     seed = 42
     file_cadu_count = None
+    vcid_list = None
+    spacecraft_id = 0x123
     if payload_mode == "Pseudo-random":
         seed = st.number_input("Seed", value=42, step=1)
         n_cadu = st.slider(
@@ -337,6 +339,52 @@ with st.sidebar:
                 "and is only (re)computed when you click 'Generate export file'."
             ),
         )
+
+        if not is_cadu_input:
+            enable_vc = st.checkbox(
+                "Assign Virtual Channels",
+                help=(
+                    "Builds a real CCSDS TM primary header (132.0-B-3 4.1.2) into "
+                    "each synthetic Transfer Frame, carrying a Virtual Channel ID "
+                    "from the pattern below -- for validating that a receiver "
+                    "correctly identifies and routes frames to each Virtual "
+                    "Channel. Only overwrites the first 6 bytes of the synthetic "
+                    "payload (the rest, and everything else in the chain, is "
+                    "unaffected); not available with an uploaded real Transfer "
+                    "Frame file, which already carries its own real header."
+                ),
+            )
+            if enable_vc:
+                vc_col1, vc_col2 = st.columns([2, 1])
+                with vc_col1:
+                    vcid_text = st.text_input(
+                        "VCID pattern (comma-separated, 0-7)", value="0, 1, 2",
+                        help=(
+                            "Round-robined across generated frames: frame 0 gets "
+                            "the first value, frame 1 the second, and so on, "
+                            "repeating. Repeat a value to give it proportionally "
+                            "more frames -- e.g. '0, 0, 1' gives Virtual Channel 0 "
+                            "twice Virtual Channel 1's share."
+                        ),
+                    )
+                with vc_col2:
+                    spacecraft_id = st.number_input(
+                        "Spacecraft ID", min_value=0, max_value=1023, value=0x123, step=1,
+                        help="10-bit SCID (0-1023) carried in the synthetic primary header.",
+                    )
+                try:
+                    vcid_list = [int(v.strip()) for v in vcid_text.split(",") if v.strip() != ""]
+                    if not vcid_list:
+                        raise ValueError("pattern is empty")
+                    for v in vcid_list:
+                        if not (0 <= v < 8):
+                            raise ValueError(f"{v} is out of range (Virtual Channel IDs are 3-bit, 0-7)")
+                except ValueError as e:
+                    st.error(f"Invalid VCID pattern: {e}. Use comma-separated integers 0-7, e.g. '0, 1, 2'.")
+                    st.stop()
+                st.caption(
+                    f"{len(vcid_list)}-frame pattern, cycling: " + ", ".join(f"VC{v}" for v in vcid_list)
+                )
     else:
         uploaded = st.file_uploader(
             "CADU (binary)" if is_cadu_input else "Transfer Frame (binary)", type=None,
@@ -450,6 +498,8 @@ params = ChainParams(
     n_cadu=int(n_cadu),
     payload_bytes=payload_source_bytes,
     seed=int(seed),
+    vcid_list=vcid_list,
+    spacecraft_id=int(spacecraft_id),
 )
 
 panel = st.container(border=True)
@@ -479,7 +529,7 @@ with panel:
         return f'<span class="{cls}">{label}</span>'
 
     stages_html = '<div class="stage-row">' + '<span class="arrow">&rarr;</span>'.join([
-        chip("CADU (in)" if is_cadu_input else "PAYLOAD", True),
+        chip("CADU (in)" if is_cadu_input else ("PAYLOAD +VC" if vcid_list is not None else "PAYLOAD"), True),
         chip(f"RS(255,{rs_k}) I={interleave_depth}" + (" [in CADU]" if is_cadu_input else ""), fec_rs and not is_cadu_input),
         chip(randomizer_label.split(" ")[0].upper(), randomizer != "none"),
         chip("+ASM" + (" [in CADU]" if is_cadu_input else ""), not is_cadu_input),

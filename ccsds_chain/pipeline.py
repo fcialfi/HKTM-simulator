@@ -14,6 +14,7 @@ from .convolutional import conv_encode, ConvEncoder
 from .scrambler import pn_sequence
 from .mapping import BITS_PER_SYMBOL, bits_to_nrzl, map_symbols
 from .pulse_shaping import rrc_taps, pulse_shape, RRCPulseShaper
+from .transfer_frame import PRIMARY_HEADER_BYTES, build_primary_header, vcid_schedule_counts
 from .utils import (bytes_to_bits, find_all_cadu_positions, find_cadu_sync, generate_payload,
                      pack_iq_interleaved, resample_iq)
 
@@ -48,6 +49,20 @@ class ChainParams:
     payload_source: str | None = None
     payload_bytes: bytes | None = None
     seed: int = 42
+    vcid_list: list[int] | None = None  # None = no synthetic Transfer Frame header (default,
+                                         # unchanged behavior). A list of Virtual Channel IDs
+                                         # (0-7) round-robined across generated frames -- builds
+                                         # a real 6-octet CCSDS TM primary header (132.0-B-3
+                                         # 4.1.2) with the per-frame VCID from this list, so a
+                                         # receiver's Virtual Channel identification/routing can
+                                         # be validated against a known assignment. Repeat a VCID
+                                         # to give it proportionally more frames (e.g. [0, 0, 1]
+                                         # gives VC 0 twice VC 1's share). Only applies to
+                                         # "transfer_frame" input with synthetic (pseudo-random)
+                                         # payload -- never to an uploaded real Transfer Frame
+                                         # file, which already carries its own real header.
+    spacecraft_id: int = 0x123  # 10-bit SCID (0-1023) used in the synthetic primary header
+                                 # above, when vcid_list is set; otherwise unused.
 
     @property
     def rs_k(self) -> int:
@@ -115,6 +130,22 @@ def _validate_chain_params(p: ChainParams) -> None:
         raise NotImplementedError(f"encoding {p.encoding!r} not implemented (baseline: NRZ-L)")
     if p.input_format not in ("transfer_frame", "cadu"):
         raise NotImplementedError(f"input_format {p.input_format!r} not implemented (expected 'transfer_frame' or 'cadu')")
+    if p.vcid_list is not None:
+        if p.input_format != "transfer_frame":
+            raise ValueError("vcid_list (synthetic Transfer Frame headers) only applies to input_format='transfer_frame'")
+        if p.payload_source is not None or p.payload_bytes is not None:
+            raise ValueError(
+                "vcid_list (synthetic Transfer Frame headers) can't be combined with a real "
+                "payload file/bytes: it would overwrite the first 6 bytes of your real data "
+                "with a synthetic header. Use it only with pseudo-random payload."
+            )
+        if len(p.vcid_list) == 0:
+            raise ValueError("vcid_list must not be empty")
+        for vcid in p.vcid_list:
+            if not (0 <= vcid < 8):
+                raise ValueError(f"vcid_list values must be 3-bit Virtual Channel IDs (0-7), got {vcid}")
+        if not (0 <= p.spacecraft_id < 1024):
+            raise ValueError(f"spacecraft_id must fit in 10 bits (0-1023), got {p.spacecraft_id}")
 
 
 def _unit_bytes(p: ChainParams) -> tuple:
@@ -279,6 +310,20 @@ def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
             bits[asm_bit_len:] = np.bitwise_xor(bits[asm_bit_len:], prep.pn)
         return bits
     frame = prep.payload[i * prep.frame_bytes:(i + 1) * prep.frame_bytes]
+    if p.vcid_list is not None:
+        # Overwrite the first PRIMARY_HEADER_BYTES of the frame with a real
+        # CCSDS TM primary header carrying this frame's assigned VCID (see
+        # ChainParams.vcid_list) -- the rest of the synthetic payload is
+        # left as-is (there's no real Space Packet structure to preserve
+        # inside it; see transfer_frame.py's module docstring). Guaranteed
+        # not to run on an uploaded real Transfer Frame file/bytes --
+        # _validate_chain_params() rejects that combination up front.
+        vcid, vc_frame_count = vcid_schedule_counts(p.vcid_list, i)
+        header = build_primary_header(
+            scid=p.spacecraft_id, vcid=vcid,
+            mc_frame_count=i % 256, vc_frame_count=vc_frame_count % 256,
+        )
+        frame = header + frame[PRIMARY_HEADER_BYTES:]
     rs_block = (rs_encode_interleaved(frame, p.rs_k, p.rs_n, p.interleave_depth)
                 if p.fec_rs else frame)
     rs_bits = bytes_to_bits(rs_block)
@@ -311,6 +356,8 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "rs_n": p.rs_n,
         "interleave_depth": p.interleave_depth,
         "n_cadu": p.n_cadu,
+        "vcid_list": p.vcid_list,
+        "spacecraft_id": p.spacecraft_id if p.vcid_list is not None else None,
     }
 
 

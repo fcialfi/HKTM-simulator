@@ -189,6 +189,74 @@ class TestCaduInputRandomizer:
         assert np.array_equal(round_tripped_bits, bytes_to_bits(cadu))
 
 
+class TestVirtualChannelFraming:
+    """`vcid_list` builds a real CCSDS TM primary header (see
+    transfer_frame.py) into synthetic Transfer Frames, so a receiver's
+    Virtual Channel identification/routing can be validated against a
+    known, controlled assignment -- round-robined across generated
+    frames, with a VCID's repeat count in the list weighting its share."""
+
+    def test_rejected_with_cadu_input(self):
+        with pytest.raises(ValueError, match="input_format='transfer_frame'"):
+            run_chain(_small_params(input_format="cadu", vcid_list=[0]))
+
+    def test_rejected_with_a_real_payload_file(self):
+        p = _small_params(vcid_list=[0], payload_bytes=bytes(100_000))
+        with pytest.raises(ValueError, match="real payload"):
+            run_chain(p)
+
+    def test_rejected_for_out_of_range_vcid(self):
+        with pytest.raises(ValueError, match="0-7"):
+            run_chain(_small_params(vcid_list=[8]))
+
+    def test_rejected_for_empty_list(self):
+        with pytest.raises(ValueError, match="empty"):
+            run_chain(_small_params(vcid_list=[]))
+
+    def test_disabled_by_default(self):
+        result = run_chain(_small_params())
+        assert result.meta["vcid_list"] is None
+        assert result.meta["spacecraft_id"] is None
+
+    def test_headers_land_in_the_transmitted_cadus_with_correct_assignment(self):
+        """Systematic RS encoding means the frame's leading bytes (the
+        header, when vcid_list is set) are transmitted byte-for-byte
+        unaltered right after the ASM -- so the actual CADU bytes this
+        chain would put on the air can be checked directly against what
+        transfer_frame.py predicts for each frame index."""
+        from ccsds_chain.transfer_frame import build_primary_header, vcid_schedule_counts
+        from ccsds_chain.utils import bits_to_bytes
+
+        pattern = [0, 0, 1, 2]
+        p = _small_params(n_cadu=8, vcid_list=pattern, spacecraft_id=0x123,
+                           fec_rs=True, randomizer="none")
+        prep = pipeline._prepare_payload(p)
+        for i in range(8):
+            cadu = bits_to_bytes(pipeline._cadu_bits(p, prep, i))
+            header_in_cadu = cadu[len(p.asm):len(p.asm) + 6]
+            vcid, vc_frame_count = vcid_schedule_counts(pattern, i)
+            expected = build_primary_header(
+                scid=p.spacecraft_id, vcid=vcid,
+                mc_frame_count=i % 256, vc_frame_count=vc_frame_count % 256,
+            )
+            assert header_in_cadu == expected
+
+    def test_meta_reports_vcid_list_and_spacecraft_id(self):
+        p = _small_params(vcid_list=[0, 1, 2], spacecraft_id=0x2AA)
+        result = run_chain(p)
+        assert result.meta["vcid_list"] == [0, 1, 2]
+        assert result.meta["spacecraft_id"] == 0x2AA
+
+    def test_export_chain_matches_run_chain_with_vcid_list(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "_EXPORT_BATCH_TARGET_BYTES", 1)  # forces batch_n_cadu == 1
+        p = _small_params(n_cadu=6, vcid_list=[0, 1, 2], spacecraft_id=0x123)
+        expected = pack_iq_interleaved(normalize_peak(run_chain(p).iq, peak=0.9), "int16")
+
+        out_path = tmp_path / "out.raw"
+        export_chain(p, str(out_path), output_dtype="int16", peak=0.9)
+        assert out_path.read_bytes() == expected
+
+
 class TestExportChainMatchesRunChain:
     """export_chain()'s own docstring claim: for int16 output, batched
     streaming export is exactly byte-for-byte identical to packing

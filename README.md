@@ -96,6 +96,24 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
      *longer* than the real spacing to the next ASM found in the file, a
      clear, actionable error is raised (GUI and CLI): the configured
      settings don't match how these CADUs were actually built.
+
+     With `transfer_frame` input and synthetic (pseudo-random) payload,
+     `--vcid-list` (or, in the GUI, "Assign Virtual Channels") builds a
+     real 6-octet CCSDS TM primary header (132.0-B-3 "TM Space Data Link
+     Protocol" 4.1.2 -- a different part of the standard from the channel
+     coding the rest of this tool implements) into each generated frame,
+     carrying a Virtual Channel ID from a comma-separated list, round-
+     robined across frames (e.g. `0,0,1,2` gives Virtual Channel 0 twice
+     any other VC's share). This is for validating that a receiver
+     correctly *identifies and routes* frames to each Virtual Channel --
+     something a single undifferentiated stream of payload bytes can't
+     exercise. Only the primary header (Spacecraft ID, VCID, Master/
+     Virtual Channel Frame Count, an "Idle Data" Data Field Status) is
+     built; there's no real Space Packet structure or secondary header
+     inside the frame, and it's rejected outright when combined with a
+     real uploaded Transfer Frame file (it would overwrite the first 6
+     bytes of real data with a synthetic header) -- see
+     `ccsds_chain/transfer_frame.py`.
 2. **Reed-Solomon**: RS(255,223) with E=16 (default) or RS(255,239) with
    E=8, interleaving at a selectable depth I=1,2,3,4,5,8 (byte `i` goes into
    sub-stream `i mod I`). CCSDS-native implementation (not a generic RS
@@ -211,6 +229,10 @@ python generate_signal.py --rs-e 8 --interleave-depth 2 --conv-rate 3/4 -o test2
 python generate_signal.py --modulation BPSK -o test3.raw
 python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # for an RF Recorder/Replayer
 
+# 3 Virtual Channels, VC 0 getting twice VC 1/2's share of frames -- for
+# validating a receiver's VC identification/routing
+python generate_signal.py --vcid-list 0,0,1,2 --spacecraft-id 291 -o test4.raw
+
 python verify_spectrum.py output/qpsk_ccsds_....iq --plot spectrum.png
 ```
 
@@ -284,8 +306,10 @@ running the decoder for real, against real injected errors, can show.
   `.rfcatcher` format (with its own header/metadata) instead of the raw
   binary produced here.
 - **Payload**: currently pseudo-random test data (or raw Transfer Frames
-  from a file); no real CCSDS Transfer Frame header is constructed (VCID,
-  counters, CRC, etc.).
+  from a file). A real primary header (Spacecraft ID, VCID, Master/Virtual
+  Channel Frame Count) can be built in with `--vcid-list` (see above), but
+  only that: no secondary header, no real CCSDS Space Packet structure
+  inside the frame, and no CRC.
 - **RRC filter transient**: since only a single RRC filter is applied (not
   a matched Tx/Rx pair), the output has a transient of `RRC_SPAN/2` symbols
   at the start and end.

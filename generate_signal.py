@@ -94,6 +94,19 @@ def build_cli():
                          "runs on it)")
     p.add_argument("--payload-source", type=str, default=PAYLOAD_SOURCE)
     p.add_argument("--seed", type=int, default=PAYLOAD_SEED)
+    p.add_argument("--vcid-list", type=str, default=None,
+                    help="comma-separated Virtual Channel IDs (0-7), e.g. '0,1,2', round-"
+                         "robined across generated Transfer Frames: builds a real CCSDS TM "
+                         "primary header (132.0-B-3 4.1.2) carrying each frame's assigned "
+                         "VCID, for validating a receiver correctly identifies/routes frames "
+                         "by Virtual Channel. Repeat a value to weight it more heavily (e.g. "
+                         "'0,0,1' gives VC 0 twice VC 1's share). Only valid with "
+                         "--input-format transfer_frame and no --payload-source (it would "
+                         "overwrite the first 6 bytes of real data); default: no synthetic "
+                         "header, unchanged payload")
+    p.add_argument("--spacecraft-id", type=int, default=0x123,
+                    help="10-bit Spacecraft ID (0-1023) for the synthetic primary header "
+                         "when --vcid-list is set; otherwise unused")
     p.add_argument("--dtype", choices=["float32", "int16"], default=OUTPUT_DTYPE,
                     help="IQ sample format for the output file; int16 is the RF-Catcher "
                          "format (little-endian, 12 significant bits, range [-2048, 2047])")
@@ -109,6 +122,16 @@ def build_cli():
 
 def main():
     args = build_cli()
+
+    vcid_list = None
+    if args.vcid_list is not None:
+        try:
+            vcid_list = [int(v.strip()) for v in args.vcid_list.split(",") if v.strip() != ""]
+            if not vcid_list:
+                raise ValueError("pattern is empty")
+        except ValueError as e:
+            raise SystemExit(f"--vcid-list: invalid pattern {args.vcid_list!r} ({e}); "
+                              "expected comma-separated integers 0-7, e.g. '0,1,2'")
 
     params = ChainParams(
         modulation=args.modulation,
@@ -131,6 +154,8 @@ def main():
         n_cadu=args.n_cadu,
         payload_source=args.payload_source,
         seed=args.seed,
+        vcid_list=vcid_list,
+        spacecraft_id=args.spacecraft_id,
     )
     is_cadu_input = params.input_format == "cadu"
     unit_bytes = len(params.asm) + params.rs_n * params.interleave_depth if is_cadu_input else params.rs_k * params.interleave_depth
@@ -138,6 +163,9 @@ def main():
     print(f"[1/9] Payload generation: {params.n_cadu} CADU x {unit_bytes} bytes "
           f"({'file: ' + params.payload_source if params.payload_source else 'pseudo-random, seed=' + str(params.seed)}), "
           f"input-format={params.input_format}")
+    if params.vcid_list is not None:
+        print(f"       -> synthetic Transfer Frame headers: spacecraft_id=0x{params.spacecraft_id:03X}, "
+              f"VCID pattern {params.vcid_list} (round-robined)")
     if is_cadu_input:
         print("[2/9] RS SKIPPED -- input already contains complete, RS-encoded CADUs")
         print(f"[3/9] Pseudo-randomizer CCSDS ({params.randomizer}, excludes ASM) -- re-applied to the "
