@@ -466,6 +466,46 @@ class TestTransmitterImpairments:
         export_chain(p, str(out_path), output_dtype="int16", peak=0.9)
         assert out_path.read_bytes() == expected
 
+    def test_iq_imbalance_produces_a_visible_image_once_offset_from_zero_hz(self):
+        """Regression test for an ordering bug: this chain's 0 Hz *is* the
+        transmitter's intended RF center frequency, so apply_iq_imbalance()'s
+        mirror-image term only separates visibly from the wanted signal once
+        freq_offset_hz has displaced it away from 0 Hz first (see
+        _apply_impairments()'s docstring) -- applying imbalance to a signal
+        still symmetric about 0 Hz (this project's random-data QPSK, with no
+        offset) folds the "image" invisibly back onto the same band. Checks
+        this against the actual run_chain() output, not just the impairment
+        functions in isolation (which are correct either way -- this is
+        about *pipeline ordering*, not the per-function math)."""
+        n_cadu = 30
+        freq_offset = 1_500_000.0
+
+        def psd_db(iq, fs):
+            spec = np.fft.fftshift(np.fft.fft(iq * np.hanning(len(iq))))
+            freqs = np.fft.fftshift(np.fft.fftfreq(len(iq), 1 / fs))
+            p_db = 20 * np.log10(np.abs(spec) + 1e-12)
+            return freqs, p_db - p_db.max()
+
+        p_offset_only = _small_params(n_cadu=n_cadu, freq_offset_hz=freq_offset)
+        result = run_chain(p_offset_only)
+        fs = result.sample_rate
+        freqs, psd_offset_only = psd_db(result.iq, fs)
+
+        p_offset_and_imbalance = _small_params(
+            n_cadu=n_cadu, freq_offset_hz=freq_offset,
+            iq_gain_imbalance_db=3.0, iq_phase_imbalance_deg=15.0,
+        )
+        _, psd_with_imbalance = psd_db(run_chain(p_offset_and_imbalance).iq, fs)
+
+        image_band = (freqs >= -1.8e6) & (freqs < -1.2e6)  # mirror of the +1.5 MHz wanted band
+        wanted_band = (freqs >= 1.2e6) & (freqs < 1.8e6)
+
+        image_rise_db = psd_with_imbalance[image_band].mean() - psd_offset_only[image_band].mean()
+        wanted_change_db = psd_with_imbalance[wanted_band].mean() - psd_offset_only[wanted_band].mean()
+
+        assert image_rise_db > 20, f"expected a clearly visible image (>20 dB rise), got {image_rise_db:.1f} dB"
+        assert abs(wanted_change_db) < 1, f"wanted band should stay ~unchanged, moved {wanted_change_db:.1f} dB"
+
 
 class TestExportChainMatchesRunChain:
     """export_chain()'s own docstring claim: for int16 output, batched
