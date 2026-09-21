@@ -3,19 +3,27 @@ signal -- the analog transmit chain's own imperfections, distinct from the
 channel/receiver-side effects a replayer's AWGN injection covers. Real
 Eb/N0 sweeps (amplitude scaling + noise, done by the replayer) validate a
 receiver's sensitivity; these validate its tolerance to a real
-transmitter's non-idealities: a residual LO frequency/phase error, an
-imperfect IQ modulator, and oscillator phase noise.
+transmitter's non-idealities, from three different physical subsystems of
+the chain:
 
-Applied (see pipeline._apply_impairments()) as: frequency offset -> phase
-noise -> IQ imbalance last. This chain's 0 Hz *is* the transmitter's
-intended RF center frequency (there is no separate software upconversion
-stage), and apply_iq_imbalance()'s mirror-image term reflects about that
-0 Hz -- so it only produces a visible, separate image in the spectrum once
-frequency offset has already displaced the wanted signal away from 0 Hz;
-applied first, to a signal still symmetric about 0 Hz (as this project's
-random-data QPSK is, with no offset), the mirror folds invisibly back onto
-the same band. Frequency offset and phase noise commute with each other
-(both are pure phase rotations), so their relative order doesn't matter.
+- LO/synthesizer: a residual frequency/phase error (apply_frequency_offset)
+  and phase noise (PhaseNoiseGenerator).
+- IQ modulator: gain/phase imbalance (apply_iq_imbalance).
+- Power amplifier: saturation/compression and AM-PM conversion
+  (apply_pa_nonlinearity) -- the last physical stage before the antenna.
+
+Applied (see pipeline._apply_impairments()) in that order: frequency
+offset -> phase noise -> IQ imbalance -> PA nonlinearity last, matching
+where each originates along the real signal path. This chain's 0 Hz *is*
+the transmitter's intended RF center frequency (there is no separate
+software upconversion stage), and apply_iq_imbalance()'s mirror-image term
+reflects about that 0 Hz -- so it only produces a visible, separate image
+in the spectrum once frequency offset has already displaced the wanted
+signal away from 0 Hz; applied first, to a signal still symmetric about
+0 Hz (as this project's random-data QPSK is, with no offset), the mirror
+folds invisibly back onto the same band. Frequency offset and phase noise
+commute with each other (both are pure phase rotations), so their relative
+order doesn't matter.
 """
 
 import numpy as np
@@ -90,3 +98,59 @@ class PhaseNoiseGenerator:
         phase = self._phase + np.cumsum(increments)
         self._phase = phase[-1]
         return iq * np.exp(1j * phase)
+
+
+def apply_pa_nonlinearity(iq: np.ndarray, backoff_db: float, smoothness: float, am_pm_deg_per_db: float = 0.0) -> np.ndarray:
+    """Models a power amplifier's saturation/compression (AM-AM) and,
+    optionally, its AM-PM conversion -- a memoryless nonlinearity applied
+    to each sample's instantaneous envelope, the last physical stage
+    before the antenna. Unlike the other impairments here (pure phase
+    rotations or a linear image term), a real nonlinearity generates
+    energy at harmonics of the signal's own spectral content; for a
+    complex baseband/IQ representation (no physical carrier in software --
+    see this module's own docstring) that shows up as *spectral regrowth*
+    just outside the occupied bandwidth (odd-order intermodulation
+    products folding back in-band/adjacent-band) rather than literal
+    harmonics at multiples of an RF carrier this chain never actually
+    synthesizes -- the same effect a spectrum analyzer's adjacent-channel
+    power measurement is built to catch on a real PA. See
+    tests/test_impairments.py for a check that this actually raises the
+    signal's own out-of-band shoulders.
+
+    AM-AM: the Rapp model (widely used for solid-state PAs), a smooth
+    saturating curve from an exactly-linear small-signal region to an
+    output envelope that asymptotically approaches `A_sat` however large
+    the input gets:
+
+        A_sat = 10^(backoff_db / 20)   (this project's reference unit
+                                          amplitude is 1.0 -- an ideal
+                                          QPSK/BPSK symbol's own magnitude,
+                                          see mapping.py -- so backoff_db
+                                          is how far above a nominal
+                                          symbol's amplitude the PA
+                                          saturates; the RRC-pulse-shaped
+                                          envelope's own peaks routinely
+                                          exceed that reference by a few
+                                          dB, so a small backoff already
+                                          produces visible compression)
+        gain(r) = 1 / (1 + (r/A_sat)^(2p))^(1/(2p))   (p = `smoothness`;
+                                                         higher = sharper
+                                                         knee, lower =
+                                                         softer)
+
+    AM-PM (optional, 0 = disabled): a phase shift proportional to how much
+    a sample is being compressed, in degrees per dB of AM-AM compression
+    -- the same "deg/dB" figure real TWTA/SSPA datasheets quote.
+
+    Stateless (a pure function of each sample's own instantaneous
+    envelope): no cross-batch state to carry, unlike PhaseNoiseGenerator.
+    """
+    a_sat = 10 ** (backoff_db / 20.0)
+    r = np.abs(iq)
+    gain = 1.0 / (1 + (r / a_sat) ** (2 * smoothness)) ** (1 / (2 * smoothness))
+    out = iq * gain
+    if am_pm_deg_per_db != 0:
+        compression_db = -20 * np.log10(gain)
+        phase_shift = np.deg2rad(am_pm_deg_per_db) * compression_db
+        out = out * np.exp(1j * phase_shift)
+    return out

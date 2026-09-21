@@ -506,6 +506,73 @@ class TestTransmitterImpairments:
         assert image_rise_db > 20, f"expected a clearly visible image (>20 dB rise), got {image_rise_db:.1f} dB"
         assert abs(wanted_change_db) < 1, f"wanted band should stay ~unchanged, moved {wanted_change_db:.1f} dB"
 
+    def test_pa_disabled_by_default(self):
+        result = run_chain(_small_params())
+        assert result.meta["pa_backoff_db"] is None
+        assert result.meta["pa_smoothness"] is None
+        assert result.meta["pa_am_pm_deg_per_db"] is None
+
+    def test_pa_rejects_non_positive_smoothness(self):
+        with pytest.raises(ValueError, match="pa_smoothness"):
+            run_chain(_small_params(pa_backoff_db=0.0, pa_smoothness=0.0))
+
+    def test_pa_changes_the_signal(self):
+        p_plain = _small_params(n_cadu=20)
+        p_pa = _small_params(n_cadu=20, pa_backoff_db=0.0, pa_smoothness=3.0)
+        assert not np.array_equal(run_chain(p_plain).iq, run_chain(p_pa).iq)
+
+    def test_pa_meta_reports_configured_values(self):
+        p = _small_params(pa_backoff_db=-3.0, pa_smoothness=2.5, pa_am_pm_deg_per_db=4.0)
+        meta = run_chain(p).meta
+        assert meta["pa_backoff_db"] == -3.0
+        assert meta["pa_smoothness"] == 2.5
+        assert meta["pa_am_pm_deg_per_db"] == 4.0
+
+    def test_pa_produces_visible_spectral_regrowth(self):
+        """The one qualitatively different signature among these
+        impairments: a real nonlinearity generates energy outside the
+        signal's own occupied bandwidth (odd-order intermodulation
+        products), unlike the other three (pure rotation or a linear
+        image term that stays within the existing band shape)."""
+        n_cadu = 30
+
+        def psd_db(iq, fs):
+            spec = np.fft.fftshift(np.fft.fft(iq * np.hanning(len(iq))))
+            freqs = np.fft.fftshift(np.fft.fftfreq(len(iq), 1 / fs))
+            p_db = 20 * np.log10(np.abs(spec) + 1e-12)
+            return freqs, p_db - p_db.max()
+
+        p_plain = _small_params(n_cadu=n_cadu)
+        result = run_chain(p_plain)
+        fs = result.sample_rate
+        freqs, psd_plain = psd_db(result.iq, fs)
+
+        p_pa = _small_params(n_cadu=n_cadu, pa_backoff_db=-6.0, pa_smoothness=3.0)
+        _, psd_pa = psd_db(run_chain(p_pa).iq, fs)
+
+        shoulder = (freqs >= 1.5e6) & (freqs < 2.5e6)  # just outside the ~1.2 MHz occupied half-bandwidth
+        main_lobe = (freqs >= -1.0e6) & (freqs < 1.0e6)
+
+        shoulder_rise_db = psd_pa[shoulder].mean() - psd_plain[shoulder].mean()
+        main_change_db = psd_pa[main_lobe].mean() - psd_plain[main_lobe].mean()
+
+        assert shoulder_rise_db > 15, f"expected clear spectral regrowth (>15 dB rise), got {shoulder_rise_db:.1f} dB"
+        assert abs(main_change_db) < 1, f"main lobe should stay ~unchanged, moved {main_change_db:.1f} dB"
+
+    def test_pa_never_increases_peak_amplitude(self):
+        p_plain = _small_params(n_cadu=20)
+        p_pa = _small_params(n_cadu=20, pa_backoff_db=-6.0, pa_smoothness=3.0)
+        assert np.abs(run_chain(p_pa).iq).max() <= np.abs(run_chain(p_plain).iq).max()
+
+    def test_export_chain_matches_run_chain_with_pa_nonlinearity(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "_EXPORT_BATCH_TARGET_BYTES", 1)  # forces batch_n_cadu == 1
+        p = _small_params(n_cadu=6, pa_backoff_db=-3.0, pa_smoothness=2.5, pa_am_pm_deg_per_db=3.0)
+        expected = pack_iq_interleaved(normalize_peak(run_chain(p).iq, peak=0.9), "int16")
+
+        out_path = tmp_path / "out.raw"
+        export_chain(p, str(out_path), output_dtype="int16", peak=0.9)
+        assert out_path.read_bytes() == expected
+
 
 class TestExportChainMatchesRunChain:
     """export_chain()'s own docstring claim: for int16 output, batched

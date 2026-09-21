@@ -1,13 +1,20 @@
 """Physical correctness tests for the transmitter impairment models
 (impairments.py): frequency offset shifts a tone's spectrum by exactly the
 configured amount, IQ imbalance produces a mirror-image tone at the
-closed-form theoretical image rejection ratio, and phase noise is a
-deterministic, cross-batch-consistent Wiener process."""
+closed-form theoretical image rejection ratio, phase noise is a
+deterministic, cross-batch-consistent Wiener process, and PA nonlinearity
+(Rapp AM-AM + AM-PM) saturates smoothly with the right asymptotic and
+monotonicity properties."""
 
 import numpy as np
 import pytest
 
-from ccsds_chain.impairments import PhaseNoiseGenerator, apply_frequency_offset, apply_iq_imbalance
+from ccsds_chain.impairments import (
+    PhaseNoiseGenerator,
+    apply_frequency_offset,
+    apply_iq_imbalance,
+    apply_pa_nonlinearity,
+)
 
 FS = 1_000_000.0
 N = 100_000
@@ -144,3 +151,65 @@ class TestPhaseNoise:
         narrow = final_phase_std(50.0)
         wide = final_phase_std(500.0)
         assert wide > narrow
+
+
+class TestPANonlinearity:
+    def test_zero_input_passes_through(self):
+        out = apply_pa_nonlinearity(np.zeros(10, dtype=complex), backoff_db=0.0, smoothness=3.0)
+        assert np.allclose(out, 0.0)
+
+    def test_small_signal_region_is_near_linear(self):
+        """Well below saturation, the Rapp model's gain must be close to
+        unity (the whole point of a soft-saturation curve: small signals
+        pass through almost unaffected)."""
+        a_sat = 10 ** (10.0 / 20.0)  # 10 dB backoff
+        tiny = (a_sat * 0.01) * np.ones(10, dtype=complex)
+        out = apply_pa_nonlinearity(tiny, backoff_db=10.0, smoothness=3.0)
+        assert np.abs(out[0]) == pytest.approx(np.abs(tiny[0]), rel=1e-4)
+
+    def test_gain_is_monotonically_decreasing_with_amplitude(self):
+        """AM-AM compression: output/input gain must never increase as
+        input amplitude grows -- a real amplifier never un-compresses."""
+        r = np.linspace(0.01, 10.0, 200)
+        out = apply_pa_nonlinearity(r.astype(complex), backoff_db=0.0, smoothness=3.0)
+        gain = np.abs(out) / r
+        assert np.all(np.diff(gain) <= 1e-12)
+
+    def test_output_amplitude_asymptotically_saturates(self):
+        """However large the input, output envelope must approach (never
+        exceed) A_sat = 10^(backoff_db/20)."""
+        a_sat = 10 ** (3.0 / 20.0)
+        huge = np.array([1e6 + 0j])
+        out = apply_pa_nonlinearity(huge, backoff_db=3.0, smoothness=3.0)
+        assert np.abs(out[0]) == pytest.approx(a_sat, rel=1e-6)
+        assert np.abs(out[0]) <= a_sat + 1e-9
+
+    def test_never_amplifies(self):
+        r = np.linspace(0.01, 20.0, 500)
+        out = apply_pa_nonlinearity(r.astype(complex), backoff_db=-5.0, smoothness=2.0)
+        assert np.all(np.abs(out) <= r + 1e-9)
+
+    def test_am_pm_disabled_by_default_leaves_phase_unchanged(self):
+        r = np.linspace(0.1, 5.0, 50).astype(complex)  # positive real -> phase 0
+        out = apply_pa_nonlinearity(r, backoff_db=0.0, smoothness=3.0, am_pm_deg_per_db=0.0)
+        assert np.allclose(np.angle(out), 0.0, atol=1e-9)
+
+    def test_am_pm_rotates_proportionally_to_compression(self):
+        r = np.array([3.0 + 0j])  # well into compression for a 0 dB backoff
+        out_no_pm = apply_pa_nonlinearity(r, backoff_db=0.0, smoothness=3.0, am_pm_deg_per_db=0.0)
+        out_pm = apply_pa_nonlinearity(r, backoff_db=0.0, smoothness=3.0, am_pm_deg_per_db=5.0)
+        assert np.angle(out_no_pm)[0] == pytest.approx(0.0, abs=1e-9)
+        assert np.angle(out_pm)[0] > 0.05  # visibly rotated
+        # doubling the coefficient must roughly double the rotation (same
+        # compression amount, linear deg/dB conversion)
+        out_pm_2x = apply_pa_nonlinearity(r, backoff_db=0.0, smoothness=3.0, am_pm_deg_per_db=10.0)
+        assert np.angle(out_pm_2x)[0] == pytest.approx(2 * np.angle(out_pm)[0], rel=1e-6)
+
+    def test_higher_smoothness_gives_a_sharper_knee(self):
+        """A larger Rapp `p` should compress less in the small-signal
+        region (sharper, more limiter-like transition) for the same input
+        just below saturation."""
+        r = np.array([0.8 + 0j])  # just below a_sat=1.0 (0 dB backoff)
+        soft = apply_pa_nonlinearity(r, backoff_db=0.0, smoothness=1.0)
+        sharp = apply_pa_nonlinearity(r, backoff_db=0.0, smoothness=8.0)
+        assert np.abs(sharp[0]) > np.abs(soft[0])
