@@ -37,9 +37,13 @@ class ChainParams:
     conv_rate: str = "1/2"  # 1/2, 2/3, 3/4, 5/6, or 7/8 (12.4)
     conv_invert_g2: bool = True  # only applies at rate 1/2 (3.4.1(5): punctured codes use no inversion)
     randomizer: str = "none"  # "none", "short" (255-bit, legacy), "long" (131071-bit, default per 12.3)
+                               # -- also applies in "cadu" input_format (see below): a captured/decoded
+                               # CADU source is often already de-scrambled, so this still controls
+                               # whether the RS-coded region gets (re-)scrambled before transmission.
     asm: bytes = ASM
     input_format: str = "transfer_frame"  # "transfer_frame" (raw, gets RS/randomizer/ASM applied here)
-                                           # or "cadu" (already ASM+RS[+randomized]: used as-is, no re-encoding)
+                                           # or "cadu" (already ASM+RS-encoded: used as-is, no RS/ASM
+                                           # re-encoding -- but `randomizer` above still applies to it)
     n_cadu: int = 100
     payload_source: str | None = None
     payload_bytes: bytes | None = None
@@ -147,12 +151,28 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
     regenerated (an O(bits) pure-Python LFSR) on every iteration.
 
     When `input_format == "cadu"`, the caller is supplying data that is
-    *already* a stream of complete CADUs (ASM + RS-encoded, and already
-    pseudo-randomized if that's how they were built) -- e.g. captured or
-    previously generated CADUs, not raw Transfer Frames. In that case RS
-    encoding, the pseudo-randomizer and the ASM prepend must all be
-    skipped: applying them again would double-encode and prefix a second
-    ASM in front of data that already has one.
+    *already* a stream of complete CADUs (ASM + RS-encoded) -- e.g.
+    captured or previously generated CADUs, not raw Transfer Frames. RS
+    encoding and the ASM prepend are always skipped in this mode: applying
+    them again would double-encode and prefix a second ASM in front of data
+    that already has one.
+
+    Whether the pseudo-randomizer is *also* skipped depends on `p.
+    randomizer`, exactly as in `transfer_frame` mode -- it is not assumed
+    to be a no-op just because the input is already-formed CADUs. A
+    genuinely raw capture (bytes as they would appear on the air right
+    before convolutional coding) already carries the scrambling, and
+    `randomizer` should be left at "none". But a captured/decoded CADU
+    source (e.g. exported from an instrument that does its own frame sync
+    and hands back clean bytes) is commonly *de*-scrambled as part of that
+    decoding -- confirmed against a real capture, whose CADU payload
+    contained a plainly readable ASCII string (a firmware version tag)
+    that a genuinely scrambled/RS-coded byte stream could never produce.
+    Retransmitting such already-descrambled bytes without re-scrambling
+    them produces a signal a real, CCSDS-conformant receiver's descrambler
+    will XOR against the PN sequence anyway, corrupting every frame after
+    the ASM -- `randomizer` must then be set to match what the original
+    transmission used, so the RS-coded region gets scrambled again here.
 
     A real/captured CADU file is also not guaranteed to be a bare
     back-to-back stream of CADUs: a capture instrument commonly wraps each
@@ -216,8 +236,9 @@ def _prepare_payload(p: ChainParams) -> _PayloadPrep:
     else:
         payload = generate_payload(p.n_cadu, unit_bytes, p.payload_source, p.payload_bytes, p.seed)
 
-    pn = (pn_sequence(rs_block_bytes * 8, p.randomizer)
-          if (p.randomizer != "none" and not is_cadu_input) else None)
+    # Applies in both input_format modes -- see the "cadu" branch note above
+    # for why CADU input isn't assumed to already be scrambled.
+    pn = pn_sequence(rs_block_bytes * 8, p.randomizer) if p.randomizer != "none" else None
 
     return _PayloadPrep(payload=payload, unit_bytes=unit_bytes, frame_bytes=frame_bytes,
                          rs_block_bytes=rs_block_bytes, is_cadu_input=is_cadu_input,
@@ -249,7 +270,14 @@ def _cadu_bits(p: ChainParams, prep: _PayloadPrep, i: int) -> np.ndarray:
             # Pseudo-random test payload (no real source): fixed-stride,
             # exactly as generated.
             cadu = prep.payload[i * prep.unit_bytes:(i + 1) * prep.unit_bytes]
-        return bytes_to_bits(cadu)
+        bits = bytes_to_bits(cadu)
+        if prep.pn is not None:
+            # Scramble only the RS-coded region, never the ASM -- see
+            # `_prepare_payload()`'s note on why CADU input isn't assumed
+            # to already be scrambled.
+            asm_bit_len = len(p.asm) * 8
+            bits[asm_bit_len:] = np.bitwise_xor(bits[asm_bit_len:], prep.pn)
+        return bits
     frame = prep.payload[i * prep.frame_bytes:(i + 1) * prep.frame_bytes]
     rs_block = (rs_encode_interleaved(frame, p.rs_k, p.rs_n, p.interleave_depth)
                 if p.fec_rs else frame)
@@ -277,7 +305,7 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "fec_conv": p.fec_conv,
         "conv_rate": p.conv_rate,
         "conv_invert_g2": p.conv_invert_g2 and p.conv_rate == "1/2",
-        "randomizer": "none" if prep.is_cadu_input else p.randomizer,
+        "randomizer": p.randomizer,
         "rs_e": p.rs_e,
         "rs_k": p.rs_k,
         "rs_n": p.rs_n,

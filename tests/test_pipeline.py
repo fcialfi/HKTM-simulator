@@ -123,6 +123,72 @@ class TestCaduInputSync:
             pipeline._prepare_payload(full_p)
 
 
+class TestCaduInputRandomizer:
+    """CADU input isn't assumed to already be scrambled: `randomizer` must
+    keep controlling whether the RS-coded region gets (re-)scrambled even
+    in "cadu" input_format, the same as in "transfer_frame" mode. Before
+    this was fixed, CADU input unconditionally forced the randomizer off
+    (`pn = None` regardless of `p.randomizer`), so a captured/decoded CADU
+    source that was already de-scrambled (e.g. by the capture instrument's
+    own frame sync) could never be re-scrambled for retransmission -- a
+    real receiver's own descrambler would then corrupt every frame."""
+
+    @staticmethod
+    def _source(p, body_byte=0x42):
+        _, unit_bytes, _, _ = pipeline._unit_bytes(p)
+        cadu = p.asm + bytes([body_byte]) * (unit_bytes - len(p.asm))
+        return cadu, unit_bytes
+
+    def test_randomizer_none_leaves_cadu_bits_unchanged(self):
+        p = _small_params(input_format="cadu", rs_e=8, interleave_depth=1, randomizer="none")
+        cadu, _ = self._source(p)
+        full_p = ChainParams(**{**p.__dict__, "payload_bytes": cadu, "n_cadu": 1})
+        prep = pipeline._prepare_payload(full_p)
+        from ccsds_chain.utils import bytes_to_bits
+        assert np.array_equal(pipeline._cadu_bits(full_p, prep, 0), bytes_to_bits(cadu))
+
+    @pytest.mark.parametrize("randomizer", ["short", "long"])
+    def test_randomizer_scrambles_rs_region_not_asm(self, randomizer):
+        p = _small_params(input_format="cadu", rs_e=8, interleave_depth=1, randomizer=randomizer)
+        cadu, _ = self._source(p)
+        full_p = ChainParams(**{**p.__dict__, "payload_bytes": cadu, "n_cadu": 1})
+        prep = pipeline._prepare_payload(full_p)
+        bits = pipeline._cadu_bits(full_p, prep, 0)
+        from ccsds_chain.utils import bytes_to_bits
+        asm_bit_len = len(p.asm) * 8
+        original_bits = bytes_to_bits(cadu)
+        assert np.array_equal(bits[:asm_bit_len], original_bits[:asm_bit_len])  # ASM untouched
+        assert not np.array_equal(bits[asm_bit_len:], original_bits[asm_bit_len:])  # RS region scrambled
+
+    def test_meta_reports_actual_randomizer_not_forced_none(self):
+        p = _small_params(input_format="cadu", rs_e=8, interleave_depth=1, randomizer="long")
+        cadu, _ = self._source(p)
+        full_p = ChainParams(**{**p.__dict__, "payload_bytes": cadu, "n_cadu": 1})
+        result = run_chain(full_p)
+        assert result.meta["randomizer"] == "long"
+
+    def test_scrambling_is_reversible_via_the_same_pn_sequence(self):
+        """Round-trip sanity check: XOR-ing an already-scrambled CADU's
+        RS region with the same PN sequence again recovers the original
+        bytes -- confirms _cadu_bits() scrambles with a plain XOR (as
+        CCSDS section 10 specifies), not something order-dependent."""
+        p = _small_params(input_format="cadu", rs_e=8, interleave_depth=1, randomizer="long")
+        cadu, _ = self._source(p, body_byte=0x99)
+        full_p = ChainParams(**{**p.__dict__, "payload_bytes": cadu, "n_cadu": 1})
+        prep = pipeline._prepare_payload(full_p)
+        scrambled_bits = pipeline._cadu_bits(full_p, prep, 0)
+
+        # Feed the now-scrambled CADU back in as a fresh "already on-air"
+        # source with the same randomizer: scrambling it again must undo
+        # the first pass and recover the original bytes.
+        scrambled_cadu = np.packbits(scrambled_bits, bitorder="big").tobytes()
+        full_p2 = ChainParams(**{**p.__dict__, "payload_bytes": scrambled_cadu, "n_cadu": 1})
+        prep2 = pipeline._prepare_payload(full_p2)
+        round_tripped_bits = pipeline._cadu_bits(full_p2, prep2, 0)
+        from ccsds_chain.utils import bytes_to_bits
+        assert np.array_equal(round_tripped_bits, bytes_to_bits(cadu))
+
+
 class TestExportChainMatchesRunChain:
     """export_chain()'s own docstring claim: for int16 output, batched
     streaming export is exactly byte-for-byte identical to packing

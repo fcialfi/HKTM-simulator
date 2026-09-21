@@ -10,9 +10,12 @@ K=7, rate 1/2 (or punctured to 2/3, 3/4, 5/6, 7/8) over the CADU stream
 optional resample -> raw interleaved IQ (float32 or int16), no header.
 
 With --input-format cadu, the payload is instead treated as already-complete
-CADUs (ASM + RS-encoded, already pseudo-randomized if that's how they were
-built): RS, the randomizer and the ASM prepend are all skipped to avoid
-double-encoding, and only the convolutional stage onward still runs.
+CADUs (ASM + RS-encoded): RS and the ASM prepend are skipped to avoid
+double-encoding. --randomizer still applies in this mode -- set it to match
+how the source CADUs were actually built (a captured/decoded source is
+often already de-scrambled and needs --randomizer set to re-scramble it, or
+a real receiver's descrambler will corrupt every frame); only leave it at
+"none" if the bytes are exactly as they'd appear on the air.
 
 See README.md for architecture assumptions, limitations, and open TODOs
 before using the output against real ground equipment. For an interactive
@@ -81,12 +84,14 @@ def build_cli():
     p.add_argument("--no-invert-g2", action="store_true")
     p.add_argument("--randomizer", choices=["none", "short", "long"], default=RANDOMIZER,
                     help="CCSDS pseudo-randomizer: 'long' (131071-bit, current standard default), "
-                         "'short' (255-bit, legacy), or 'none'")
+                         "'short' (255-bit, legacy), or 'none'. Also applies with --input-format "
+                         "cadu (not assumed to already be applied to that input -- see above)")
     p.add_argument("--input-format", choices=["transfer_frame", "cadu"], default=INPUT_FORMAT,
                     help="what --payload-source/the generated payload represents: 'transfer_frame' "
                          "(raw, uncoded data -- RS/randomizer/ASM applied here, default) or 'cadu' "
-                         "(already complete CADUs -- ASM+RS[+randomizer] are NOT re-applied, to avoid "
-                         "double-encoding; only the convolutional stage still runs on it)")
+                         "(already complete CADUs -- ASM+RS are NOT re-applied, to avoid double-"
+                         "encoding; --randomizer still applies, and the convolutional stage still "
+                         "runs on it)")
     p.add_argument("--payload-source", type=str, default=PAYLOAD_SOURCE)
     p.add_argument("--seed", type=int, default=PAYLOAD_SEED)
     p.add_argument("--dtype", choices=["float32", "int16"], default=OUTPUT_DTYPE,
@@ -135,7 +140,9 @@ def main():
           f"input-format={params.input_format}")
     if is_cadu_input:
         print("[2/9] RS SKIPPED -- input already contains complete, RS-encoded CADUs")
-        print("[3/9] Pseudo-randomizer SKIPPED -- input already randomized if that's how the CADUs were built")
+        print(f"[3/9] Pseudo-randomizer CCSDS ({params.randomizer}, excludes ASM) -- re-applied to the "
+              "already-formed CADUs, NOT assumed to already be there"
+              f"{'' if params.randomizer != 'none' else ' (SKIPPED)'}")
         print("[4/9] ASM SKIPPED -- input already carries it per CADU")
     else:
         print(f"[2/9] RS({params.rs_n},{params.rs_k}) E={params.rs_e} encode, interleave depth {params.interleave_depth}"

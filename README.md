@@ -55,13 +55,28 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
    via `--input-format` (or, in the GUI, "Payload contains"):
    - `transfer_frame` (default): raw, uncoded Transfer Frames. RS, the
      pseudo-randomizer and the ASM are all applied here to build the CADUs.
-   - `cadu`: already-complete CADUs (ASM + RS-encoded block, already
-     pseudo-randomized if that's how they were built) -- e.g. captured or
-     previously generated CADUs. In this case RS, the randomizer and the ASM
-     are **not** re-applied (to avoid double-encoding and a second ASM in
-     front of data that already has one); only the convolutional stage (if
-     enabled) is still applied over the CADU stream, exactly as a physical
-     coder downstream of an already-formed CADU stream would.
+   - `cadu`: already-complete CADUs (ASM + RS-encoded block) -- e.g. captured
+     or previously generated CADUs. RS and the ASM are **not** re-applied
+     (to avoid double-encoding and a second ASM in front of data that
+     already has one); only the convolutional stage (if enabled) is still
+     applied over the CADU stream, exactly as a physical coder downstream of
+     an already-formed CADU stream would.
+
+     `--randomizer` still applies in this mode, and is **not** assumed to
+     already be baked into the input -- set it to match how the CADUs were
+     actually built. Leave it at `none` only if the bytes are exactly as
+     they'd appear on the air right before convolutional coding (already
+     scrambled, if that system scrambles at all). A captured/decoded CADU
+     source is often already *de*-scrambled as part of its own decoding --
+     confirmed against a real capture, whose CADU payload contained a
+     plainly readable ASCII string (a firmware version tag) that genuinely
+     scrambled/RS-coded bytes could never produce. Retransmitting such bytes
+     without re-scrambling them (`--randomizer none`) produces a signal a
+     real, CCSDS-conformant receiver's own descrambler will corrupt --
+     every frame gets rejected, not just some, since every frame passes
+     through the same broken assumption. Set `--randomizer` to whatever the
+     source system actually uses (`long` is the standard default since
+     2023) to fix this.
 
      A real/captured CADU file is not guaranteed to start exactly on a CADU
      boundary (unframed idle line-fill in front, or an excerpt starting
