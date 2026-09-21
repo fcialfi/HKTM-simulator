@@ -527,6 +527,54 @@ with st.sidebar:
         ),
     )
 
+    st.markdown("### Transmitter Impairments")
+    enable_impairments = st.checkbox(
+        "Enable typical transmitter impairments",
+        help=(
+            "Applies real-transmitter non-idealities to the pulse-shaped IQ -- "
+            "distinct from a replayer's AWGN (which characterizes receiver "
+            "sensitivity vs Eb/N0): these validate a receiver's tolerance to an "
+            "imperfect transmitter itself. Frequency offset tests carrier-"
+            "recovery acquisition against a real LO error; IQ gain/phase "
+            "imbalance tests tolerance to a real IQ modulator's mirror-image "
+            "distortion; phase noise tests tolerance to constellation smearing "
+            "from a real (non-ideal) oscillator."
+        ),
+    )
+    freq_offset_hz = 0.0
+    iq_gain_imbalance_db = 0.0
+    iq_phase_imbalance_deg = 0.0
+    phase_noise_linewidth_hz = 0.0
+    impairment_seed = 2718
+    if enable_impairments:
+        freq_offset_hz = st.number_input(
+            "Frequency offset (Hz)", value=0.0, step=100.0,
+            help="Constant residual LO frequency offset, positive or negative.",
+        )
+        iq_col1, iq_col2 = st.columns(2)
+        with iq_col1:
+            iq_gain_imbalance_db = st.number_input(
+                "IQ gain imbalance (dB)", value=0.0, step=0.1,
+                help="I/Q branch gain mismatch in the IQ modulator.",
+            )
+        with iq_col2:
+            iq_phase_imbalance_deg = st.number_input(
+                "IQ phase imbalance (deg)", value=0.0, step=0.5,
+                help="Deviation from ideal 90-degree I/Q separation.",
+            )
+        phase_noise_linewidth_hz = st.number_input(
+            "Phase noise linewidth (Hz)", min_value=0.0, value=0.0, step=10.0,
+            help="Free-running-oscillator single-sideband 3 dB linewidth. 0 disables it.",
+        )
+        active = []
+        if freq_offset_hz != 0:
+            active.append(f"{freq_offset_hz:+.0f} Hz offset")
+        if iq_gain_imbalance_db != 0 or iq_phase_imbalance_deg != 0:
+            active.append(f"IQ imbalance {iq_gain_imbalance_db:+.2f} dB / {iq_phase_imbalance_deg:+.2f}°")
+        if phase_noise_linewidth_hz > 0:
+            active.append(f"{phase_noise_linewidth_hz:.0f} Hz phase noise linewidth")
+        st.caption("Active: " + ", ".join(active) if active else "Enabled, but all values are still 0 -- no effect yet.")
+
 # --------------------------------------------------------------------------
 # Build params & run chain
 # --------------------------------------------------------------------------
@@ -556,6 +604,11 @@ params = ChainParams(
     corrupt_cadu_indices=corrupt_cadu_indices,
     corrupt_vc=int(corrupt_vc) if corrupt_vc is not None else None,
     corrupt_seed=int(corrupt_seed),
+    freq_offset_hz=float(freq_offset_hz),
+    iq_gain_imbalance_db=float(iq_gain_imbalance_db),
+    iq_phase_imbalance_deg=float(iq_phase_imbalance_deg),
+    phase_noise_linewidth_hz=float(phase_noise_linewidth_hz),
+    impairment_seed=int(impairment_seed),
 )
 
 panel = st.container(border=True)
@@ -594,6 +647,8 @@ with panel:
         chip("NRZ-L", True),
         chip(f"{modulation} GRAY" if modulation == "QPSK" else modulation, True),
         chip(f"RRC &alpha;={rrc_alpha:.2f}", True),
+        chip("TX IMPAIR", freq_offset_hz != 0 or iq_gain_imbalance_db != 0
+             or iq_phase_imbalance_deg != 0 or phase_noise_linewidth_hz > 0),
     ]) + '</div>'
     st.markdown(stages_html, unsafe_allow_html=True)
 

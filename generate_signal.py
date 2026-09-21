@@ -130,6 +130,26 @@ def build_cli():
     p.add_argument("--corrupt-seed", type=int, default=777,
                     help="seed for which symbol positions/values get flipped -- deterministic "
                          "and reproducible across runs")
+    p.add_argument("--freq-offset-hz", type=float, default=0.0,
+                    help="residual LO frequency offset applied to the pulse-shaped IQ, in Hz "
+                         "(positive or negative) -- for validating a receiver's carrier-"
+                         "recovery loop against a real (imperfect) transmitter LO, not just a "
+                         "perfectly on-frequency signal; default: 0 (disabled)")
+    p.add_argument("--iq-gain-imbalance-db", type=float, default=0.0,
+                    help="IQ modulator I/Q branch gain mismatch, in dB -- produces a mirror-"
+                         "image tone in the spectrum; default: 0 (disabled)")
+    p.add_argument("--iq-phase-imbalance-deg", type=float, default=0.0,
+                    help="IQ modulator phase deviation from ideal 90-degree I/Q separation, in "
+                         "degrees -- combines with --iq-gain-imbalance-db in the same mirror-"
+                         "image model; default: 0 (disabled)")
+    p.add_argument("--phase-noise-linewidth-hz", type=float, default=0.0,
+                    help="free-running-oscillator single-sideband 3 dB linewidth, in Hz -- "
+                         "generates Wiener (random-walk) phase noise on the IQ, for validating "
+                         "a receiver's tolerance to constellation smearing from a real "
+                         "transmitter LO; default: 0 (disabled)")
+    p.add_argument("--impairment-seed", type=int, default=2718,
+                    help="seed for the phase noise random walk -- deterministic and "
+                         "reproducible across runs")
     p.add_argument("--dtype", choices=["float32", "int16"], default=OUTPUT_DTYPE,
                     help="IQ sample format for the output file; int16 is the RF-Catcher "
                          "format (little-endian, 12 significant bits, range [-2048, 2047])")
@@ -194,6 +214,11 @@ def main():
         corrupt_cadu_indices=corrupt_cadu_indices,
         corrupt_vc=args.corrupt_vc,
         corrupt_seed=args.corrupt_seed,
+        freq_offset_hz=args.freq_offset_hz,
+        iq_gain_imbalance_db=args.iq_gain_imbalance_db,
+        iq_phase_imbalance_deg=args.iq_phase_imbalance_deg,
+        phase_noise_linewidth_hz=args.phase_noise_linewidth_hz,
+        impairment_seed=args.impairment_seed,
     )
     is_cadu_input = params.input_format == "cadu"
     unit_bytes = len(params.asm) + params.rs_n * params.interleave_depth if is_cadu_input else params.rs_k * params.interleave_depth
@@ -231,6 +256,15 @@ def main():
     print(f"[7/9] {params.modulation} mapping"
           + (" (Gray, unit energy)" if params.modulation == "QPSK" else " (unit energy, I only)"))
     print(f"[8/9] Pulse shaping RRC (alpha={params.rrc_alpha}, span={params.rrc_span}, sps={params.sps})")
+    impairments = []
+    if params.freq_offset_hz != 0:
+        impairments.append(f"freq offset {params.freq_offset_hz:+.1f} Hz")
+    if params.iq_gain_imbalance_db != 0 or params.iq_phase_imbalance_deg != 0:
+        impairments.append(f"IQ imbalance {params.iq_gain_imbalance_db:+.2f} dB / {params.iq_phase_imbalance_deg:+.2f} deg")
+    if params.phase_noise_linewidth_hz > 0:
+        impairments.append(f"phase noise {params.phase_noise_linewidth_hz:.1f} Hz linewidth")
+    if impairments:
+        print(f"       -> transmitter impairments: {', '.join(impairments)}")
 
     native_fs = params.symbol_rate * params.sps
     output_fs = args.target_fs if (args.target_fs is not None and args.target_fs != native_fs) else native_fs

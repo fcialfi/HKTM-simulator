@@ -15,6 +15,7 @@ from .scrambler import pn_sequence
 from .mapping import BITS_PER_SYMBOL, bits_to_nrzl, map_symbols
 from .pulse_shaping import rrc_taps, pulse_shape, RRCPulseShaper
 from .transfer_frame import PRIMARY_HEADER_BYTES, build_primary_header, vcid_schedule_counts
+from .impairments import apply_frequency_offset, apply_iq_imbalance, PhaseNoiseGenerator
 from .utils import (bytes_to_bits, find_all_cadu_positions, find_cadu_sync, generate_payload,
                      pack_iq_interleaved, resample_iq)
 
@@ -93,6 +94,25 @@ class ChainParams:
                               # combined with each CADU's own index (never carried as mutable
                               # state), so run_chain() and export_chain() (batched/streaming)
                               # always compute the exact same corruption for the same CADU.
+    freq_offset_hz: float = 0.0  # 0 = disabled. Constant residual LO frequency offset applied
+                                  # to the pulse-shaped IQ (ccsds_chain/impairments.py) -- for
+                                  # validating a receiver's carrier-recovery loop actually
+                                  # acquires/tracks a real (imperfect) transmitter's LO, not
+                                  # just a perfectly on-frequency signal.
+    iq_gain_imbalance_db: float = 0.0  # 0 = disabled. IQ modulator gain mismatch between the I
+                                        # and Q branches, in dB -- produces a mirror-image tone
+                                        # (see impairments.apply_iq_imbalance).
+    iq_phase_imbalance_deg: float = 0.0  # 0 = disabled. IQ modulator phase deviation from ideal
+                                          # 90 degree I/Q separation, in degrees -- combines with
+                                          # iq_gain_imbalance_db in the same mirror-image model.
+    phase_noise_linewidth_hz: float = 0.0  # 0 = disabled. Free-running-oscillator single-
+                                            # sideband 3 dB linewidth, in Hz -- generates Wiener
+                                            # (random-walk) phase noise on the IQ (see
+                                            # impairments.PhaseNoiseGenerator), for validating a
+                                            # receiver's tolerance to constellation smearing from
+                                            # a real (non-ideal) transmitter LO.
+    impairment_seed: int = 2718  # seed for the phase noise random walk -- deterministic and
+                                  # reproducible across runs; independent of corrupt_seed above.
 
     @property
     def rs_k(self) -> int:
@@ -208,6 +228,8 @@ def _validate_chain_params(p: ChainParams) -> None:
             for idx in p.corrupt_cadu_indices:
                 if idx < 0:
                     raise ValueError(f"corrupt_cadu_indices must be non-negative, got {idx}")
+    if p.phase_noise_linewidth_hz < 0:
+        raise ValueError(f"phase_noise_linewidth_hz must be non-negative, got {p.phase_noise_linewidth_hz}")
 
 
 def _unit_bytes(p: ChainParams) -> tuple:
@@ -476,7 +498,36 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "corrupt_codeword_index": p.corrupt_codeword_index if p.corrupt_rs_symbols > 0 else None,
         "corrupt_cadu_indices": p.corrupt_cadu_indices if p.corrupt_rs_symbols > 0 else None,
         "corrupt_vc": p.corrupt_vc if p.corrupt_rs_symbols > 0 else None,
+        "freq_offset_hz": p.freq_offset_hz if p.freq_offset_hz != 0 else None,
+        "iq_gain_imbalance_db": p.iq_gain_imbalance_db if p.iq_gain_imbalance_db != 0 else None,
+        "iq_phase_imbalance_deg": p.iq_phase_imbalance_deg if p.iq_phase_imbalance_deg != 0 else None,
+        "phase_noise_linewidth_hz": p.phase_noise_linewidth_hz if p.phase_noise_linewidth_hz > 0 else None,
     }
+
+
+def _apply_impairments(
+    iq: np.ndarray, p: ChainParams, sample_rate: float, start_sample: int,
+    phase_noise_gen: Optional[PhaseNoiseGenerator],
+) -> np.ndarray:
+    """Applies ChainParams' transmitter impairments to a chunk of
+    pulse-shaped IQ, in the order they originate in a real transmitter:
+    IQ modulator gain/phase imbalance (before upconversion), then LO
+    frequency offset and phase noise (impairments.py's module docstring
+    has the full rationale). Skips a stage entirely when its parameter is
+    at the "disabled" value, so a run with none of them configured is
+    bit-for-bit identical to before this feature existed. `phase_noise_gen`
+    is created once by the caller (None when disabled) and shared across
+    every chunk of one export, so its random walk and PRNG state carry
+    correctly across export_chain()'s batches; `start_sample` is this
+    chunk's absolute sample offset in the whole signal, for an exact
+    (state-free) frequency-offset phase ramp regardless of batching."""
+    if p.iq_gain_imbalance_db != 0 or p.iq_phase_imbalance_deg != 0:
+        iq = apply_iq_imbalance(iq, p.iq_gain_imbalance_db, p.iq_phase_imbalance_deg)
+    if p.freq_offset_hz != 0:
+        iq = apply_frequency_offset(iq, p.freq_offset_hz, sample_rate, start_sample=start_sample)
+    if phase_noise_gen is not None:
+        iq = phase_noise_gen.apply(iq)
+    return iq
 
 
 def run_chain(
@@ -532,10 +583,16 @@ def run_chain(
     )
     iq = pulse_shape(symbols, p.sps, taps, progress_callback=pulse_progress)
 
+    sample_rate = p.symbol_rate * p.sps
+    phase_noise_gen = (
+        PhaseNoiseGenerator(p.phase_noise_linewidth_hz, sample_rate, p.impairment_seed)
+        if p.phase_noise_linewidth_hz > 0 else None
+    )
+    iq = _apply_impairments(iq, p, sample_rate, start_sample=0, phase_noise_gen=phase_noise_gen)
+
     if progress_callback is not None:
         progress_callback(1.0, "Done")
 
-    sample_rate = p.symbol_rate * p.sps
     elapsed = time.time() - t0
 
     meta = _chain_meta(p, prep, sample_rate)
@@ -664,6 +721,10 @@ def export_chain(
     try:
         conv_encoder = ConvEncoder(invert_g2=p.conv_invert_g2, rate=p.conv_rate) if p.fec_conv else None
         shaper = RRCPulseShaper(p.sps, taps)
+        phase_noise_gen = (
+            PhaseNoiseGenerator(p.phase_noise_linewidth_hz, sample_rate, p.impairment_seed)
+            if p.phase_noise_linewidth_hz > 0 else None
+        )
         bits_per_symbol = BITS_PER_SYMBOL[p.modulation]
         # Leftover coded bits, when a batch's coded-bit count isn't a whole
         # number of symbols (possible with a punctured rate), carried into
@@ -691,6 +752,7 @@ def export_chain(
                 symbols = map_symbols(bits_to_nrzl(coded), p.modulation)
                 n_symbols += len(symbols)
                 iq_batch = shaper.shape(symbols)
+                iq_batch = _apply_impairments(iq_batch, p, sample_rate, n_native_samples, phase_noise_gen)
                 if len(iq_batch):
                     global_peak = max(global_peak, np.abs(iq_batch.real).max(), np.abs(iq_batch.imag).max())
                     n_native_samples += len(iq_batch)
@@ -703,6 +765,7 @@ def export_chain(
                     )
 
             tail = shaper.flush()
+            tail = _apply_impairments(tail, p, sample_rate, n_native_samples, phase_noise_gen)
             if len(tail):
                 global_peak = max(global_peak, np.abs(tail.real).max(), np.abs(tail.imag).max())
                 n_native_samples += len(tail)
