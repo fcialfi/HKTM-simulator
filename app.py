@@ -286,40 +286,6 @@ with st.sidebar:
     )
     randomizer = {"Long (131071-bit)": "long", "Short (255-bit, legacy)": "short", "None": "none"}[randomizer_label]
 
-    st.markdown("### Pulse Shaping (RRC)")
-    st.caption(f"Shapes the {modulation} symbols into a band-limited waveform (Root-Raised-Cosine filter) before D/A conversion.")
-    rrc_alpha = st.slider(
-        "Roll-off (alpha)", 0.05, 1.00, 0.35, 0.01,
-        help=(
-            "Excess-bandwidth factor of the RRC filter (0-1). Trades occupied "
-            "bandwidth against tolerance to timing/synchronization error: lower "
-            "alpha keeps the occupied bandwidth close to the symbol rate but makes "
-            "pulses sharper and more sensitive to timing offsets; higher alpha "
-            "widens the occupied bandwidth toward 2x the symbol rate but gives "
-            "smoother, more timing-tolerant pulses. Theoretical occupied bandwidth "
-            "= symbol rate x (1 + alpha). CCSDS commonly uses 0.35."
-        ),
-    )
-    rrc_span = st.slider(
-        "Span (symbols)", 4, 16, 8, 1,
-        help=(
-            "Length of the RRC filter's impulse response, in symbol periods. A "
-            "longer span approximates the ideal (infinite) RRC filter more "
-            "closely and reduces residual inter-symbol interference, at the cost "
-            "of a longer start/end transient (group delay = span/2 symbols) and "
-            "more computation."
-        ),
-    )
-    sps = st.select_slider(
-        "Samples/symbol", options=[2, 4, 8], value=4,
-        help=(
-            "Oversampling factor: number of I/Q samples generated per symbol. "
-            "Sets the output sample rate = symbol rate x samples/symbol. Needs to "
-            "be high enough to represent the occupied bandwidth (roughly "
-            "symbol rate x (1 + alpha)) without aliasing."
-        ),
-    )
-
     st.markdown("### Payload & Duration")
     file_upload_label = "CADU file" if is_cadu_input else "Transfer Frame file"
     payload_mode = st.radio("Payload source", ["Pseudo-random", file_upload_label], horizontal=True)
@@ -476,56 +442,90 @@ with st.sidebar:
                 ),
             )
 
-corrupt_rs_symbols = 0
-corrupt_codeword_index = 0
-corrupt_cadu_indices = None
-corrupt_vc = None
-corrupt_seed = 777
-if fec_rs or is_cadu_input:
-    st.markdown("### Deterministic Error Injection")
-    enable_corruption = st.checkbox(
-        "Inject controlled RS symbol errors",
+    corrupt_rs_symbols = 0
+    corrupt_codeword_index = 0
+    corrupt_cadu_indices = None
+    corrupt_vc = None
+    corrupt_seed = 777
+    if fec_rs or is_cadu_input:
+        st.markdown("### Deterministic Error Injection")
+        enable_corruption = st.checkbox(
+            "Inject controlled RS symbol errors",
+            help=(
+                "Deterministically flips an exact number of RS symbols within one "
+                "interleaved codeword of chosen CADUs -- for boundary-testing a "
+                "receiver's RS decoder against its declared correction capability E "
+                "(E errors must still decode perfectly, E+1 must fail/be flagged), "
+                "or for validating that a receiver's per-Virtual-Channel FER "
+                "accounting attributes errors to the right channel and leaves "
+                "others untouched. Complementary to a replayer's AWGN, which "
+                "characterizes statistical BER/FER vs Eb/N0 well but can't "
+                "guarantee hitting a precise per-codeword error count."
+            ),
+        )
+        if enable_corruption:
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                corrupt_rs_symbols = st.number_input(
+                    "Symbols to flip per codeword", min_value=1, max_value=255, value=int(rs_e), step=1,
+                    help=f"Try {rs_e} (the declared E) to confirm it still decodes, and {rs_e + 1} to confirm it correctly fails.",
+                )
+            with cc2:
+                corrupt_codeword_index = st.number_input(
+                    "Codeword index", min_value=0, max_value=int(interleave_depth) - 1, value=0, step=1,
+                    help="Which of the interleave_depth interleaved codewords to corrupt (0-based).",
+                )
+            target_mode = (
+                st.radio("Target", ["Specific CADU indices", "Virtual Channel"], horizontal=True)
+                if vcid_list is not None else "Specific CADU indices"
+            )
+            if target_mode == "Specific CADU indices":
+                indices_text = st.text_input("CADU indices (comma-separated, 0-based)", value="0")
+                try:
+                    corrupt_cadu_indices = [int(v.strip()) for v in indices_text.split(",") if v.strip() != ""]
+                    if not corrupt_cadu_indices:
+                        raise ValueError("list is empty")
+                except ValueError as e:
+                    st.error(f"Invalid CADU index list: {e}. Use comma-separated integers, e.g. '0, 5, 10'.")
+                    st.stop()
+                st.caption(f"Corrupting {corrupt_rs_symbols} symbol(s) in codeword {corrupt_codeword_index} of CADU(s) {corrupt_cadu_indices}")
+            else:
+                corrupt_vc = st.number_input("Virtual Channel ID", min_value=0, max_value=7, value=vcid_list[0], step=1)
+                st.caption(f"Corrupting {corrupt_rs_symbols} symbol(s) in codeword {corrupt_codeword_index} of every VC{corrupt_vc} CADU")
+
+    st.markdown("### Pulse Shaping (RRC)")
+    st.caption(f"Shapes the {modulation} symbols into a band-limited waveform (Root-Raised-Cosine filter) before D/A conversion.")
+    rrc_alpha = st.slider(
+        "Roll-off (alpha)", 0.05, 1.00, 0.35, 0.01,
         help=(
-            "Deterministically flips an exact number of RS symbols within one "
-            "interleaved codeword of chosen CADUs -- for boundary-testing a "
-            "receiver's RS decoder against its declared correction capability E "
-            "(E errors must still decode perfectly, E+1 must fail/be flagged), "
-            "or for validating that a receiver's per-Virtual-Channel FER "
-            "accounting attributes errors to the right channel and leaves "
-            "others untouched. Complementary to a replayer's AWGN, which "
-            "characterizes statistical BER/FER vs Eb/N0 well but can't "
-            "guarantee hitting a precise per-codeword error count."
+            "Excess-bandwidth factor of the RRC filter (0-1). Trades occupied "
+            "bandwidth against tolerance to timing/synchronization error: lower "
+            "alpha keeps the occupied bandwidth close to the symbol rate but makes "
+            "pulses sharper and more sensitive to timing offsets; higher alpha "
+            "widens the occupied bandwidth toward 2x the symbol rate but gives "
+            "smoother, more timing-tolerant pulses. Theoretical occupied bandwidth "
+            "= symbol rate x (1 + alpha). CCSDS commonly uses 0.35."
         ),
     )
-    if enable_corruption:
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            corrupt_rs_symbols = st.number_input(
-                "Symbols to flip per codeword", min_value=1, max_value=255, value=int(rs_e), step=1,
-                help=f"Try {rs_e} (the declared E) to confirm it still decodes, and {rs_e + 1} to confirm it correctly fails.",
-            )
-        with cc2:
-            corrupt_codeword_index = st.number_input(
-                "Codeword index", min_value=0, max_value=int(interleave_depth) - 1, value=0, step=1,
-                help="Which of the interleave_depth interleaved codewords to corrupt (0-based).",
-            )
-        target_mode = (
-            st.radio("Target", ["Specific CADU indices", "Virtual Channel"], horizontal=True)
-            if vcid_list is not None else "Specific CADU indices"
-        )
-        if target_mode == "Specific CADU indices":
-            indices_text = st.text_input("CADU indices (comma-separated, 0-based)", value="0")
-            try:
-                corrupt_cadu_indices = [int(v.strip()) for v in indices_text.split(",") if v.strip() != ""]
-                if not corrupt_cadu_indices:
-                    raise ValueError("list is empty")
-            except ValueError as e:
-                st.error(f"Invalid CADU index list: {e}. Use comma-separated integers, e.g. '0, 5, 10'.")
-                st.stop()
-            st.caption(f"Corrupting {corrupt_rs_symbols} symbol(s) in codeword {corrupt_codeword_index} of CADU(s) {corrupt_cadu_indices}")
-        else:
-            corrupt_vc = st.number_input("Virtual Channel ID", min_value=0, max_value=7, value=vcid_list[0], step=1)
-            st.caption(f"Corrupting {corrupt_rs_symbols} symbol(s) in codeword {corrupt_codeword_index} of every VC{corrupt_vc} CADU")
+    rrc_span = st.slider(
+        "Span (symbols)", 4, 16, 8, 1,
+        help=(
+            "Length of the RRC filter's impulse response, in symbol periods. A "
+            "longer span approximates the ideal (infinite) RRC filter more "
+            "closely and reduces residual inter-symbol interference, at the cost "
+            "of a longer start/end transient (group delay = span/2 symbols) and "
+            "more computation."
+        ),
+    )
+    sps = st.select_slider(
+        "Samples/symbol", options=[2, 4, 8], value=4,
+        help=(
+            "Oversampling factor: number of I/Q samples generated per symbol. "
+            "Sets the output sample rate = symbol rate x samples/symbol. Needs to "
+            "be high enough to represent the occupied bandwidth (roughly "
+            "symbol rate x (1 + alpha)) without aliasing."
+        ),
+    )
 
 # --------------------------------------------------------------------------
 # Build params & run chain
