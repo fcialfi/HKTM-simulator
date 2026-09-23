@@ -19,7 +19,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ccsds_chain.mapping import BITS_PER_SYMBOL
-from ccsds_chain.pipeline import ASM, ChainParams, export_chain, run_chain
+from ccsds_chain.pipeline import ASM, ASM_FRAMED_INPUT_FORMATS, ChainParams, export_chain, run_chain
 from ccsds_chain.pulse_shaping import matched_filter_sample, rrc_taps
 from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
@@ -172,42 +172,51 @@ with st.sidebar:
         st.caption(f"Symbol rate (derived): {symbol_rate:,.0f} S/s".replace(",", " "))
 
     st.markdown("### Input")
+    input_format_options = {
+        "Transfer Frame (unencoded)": "transfer_frame",
+        "ASM + Transfer Frame (not scrambled)": "asm_frame",
+        "CADU as on air (already scrambled)": "cadu",
+    }
     input_format_label = st.radio(
-        "Payload contains", ["Transfer Frame (unencoded)", "CADU (already ASM+RS encoded)"],
-        horizontal=True,
+        "Payload contains", list(input_format_options),
         help=(
             "What the payload below actually is. 'Transfer Frame' is raw, "
             "uncoded data: RS, the pseudo-randomizer and the ASM are all "
-            "applied further down to build the CADUs from it. 'CADU' means "
-            "the bytes are already complete CADUs (ASM + RS-encoded "
-            "codeblock) -- e.g. captured or previously generated CADUs -- so "
-            "RS and the ASM prepend are skipped, to avoid double-encoding a "
-            "second layer on top; only the convolutional stage below (if "
-            "enabled) is still applied, exactly as it would be by a physical "
-            "coder sitting downstream of an already-formed CADU stream. The "
-            "pseudo-randomizer below is NOT assumed to already be applied: "
-            "set it to match how the source was actually built -- many "
-            "captured/decoded CADU sources (e.g. an instrument that does its "
-            "own frame sync) hand back already-descrambled bytes, which need "
-            "scrambling here again before transmission, or a real receiver's "
-            "own descrambler will corrupt every frame."
+            "applied further down to build the CADUs from it.\n\n"
+            "'ASM + Transfer Frame (not scrambled)' is what a ground station "
+            "that does its own frame sync hands back (e.g. Cortex, once its "
+            "per-record header/trailer is stripped): each record starts with "
+            "the ASM, followed by a frame that is NOT scrambled. The frame is "
+            "scrambled here (never the ASM); RS and the ASM are not re-applied.\n\n"
+            "'CADU as on air' means the bytes are exactly as transmitted "
+            "right before convolutional coding (already scrambled, if the "
+            "link scrambles): used verbatim, no RS/scrambling/ASM applied.\n\n"
+            "In both ASM-framed modes each record is exactly 4 + 255*I bytes "
+            "(1279 at I=5): anything after that, before the next ASM, is "
+            "receiver-added overhead and is skipped. Only the convolutional "
+            "stage below (if enabled) is still applied."
         ),
     )
-    is_cadu_input = input_format_label.startswith("CADU")
-    input_format = "cadu" if is_cadu_input else "transfer_frame"
-    if is_cadu_input:
+    input_format = input_format_options[input_format_label]
+    is_cadu_input = input_format in ASM_FRAMED_INPUT_FORMATS
+    if input_format == "asm_frame":
         st.caption(
-            "CADU input: RS encoding and ASM prepend below are skipped (the "
-            "uploaded CADUs already carry them). RS/interleave settings are "
-            "still used to know each CADU's byte length. The pseudo-"
-            "randomizer below still applies if enabled -- set it to match "
-            "how these CADUs were actually built, not left at its default."
+            "ASM + Transfer Frame input: RS encoding and ASM prepend below are "
+            "skipped; the frame after each ASM is scrambled with the pseudo-"
+            "randomizer below (the ASM never is). Interleave depth sets each "
+            "record's length (4 + 255*I bytes)."
+        )
+    elif input_format == "cadu":
+        st.caption(
+            "On-air CADU input: RS encoding, pseudo-randomizer and ASM prepend "
+            "below are all skipped -- the CADUs are used verbatim. Interleave "
+            "depth sets each CADU's length (4 + 255*I bytes)."
         )
 
     st.markdown("### FEC")
     fec_rs = st.checkbox(
         "Reed-Solomon", value=True, disabled=is_cadu_input,
-        help="Not re-applied in CADU mode: the input already carries its RS parity." if is_cadu_input else None,
+        help="Not re-applied to ASM-framed input: the block after each ASM is used as-is." if is_cadu_input else None,
     )
     rs_col1, rs_col2 = st.columns(2)
     with rs_col1:
@@ -218,9 +227,8 @@ with st.sidebar:
                 "parameter 12.5). E=16 gives RS(255,223): more parity overhead, "
                 "corrects up to 16 symbol errors per codeword. E=8 gives "
                 "RS(255,239): less overhead, corrects up to 8."
-                + (" In CADU mode this must match how the uploaded CADUs were "
-                   "actually built, since it's used to work out each CADU's "
-                   "byte length." if is_cadu_input else "")
+                + (" Not used to size ASM-framed input (only interleave depth "
+                   "is); it only matters there for error injection." if is_cadu_input else "")
             ),
         )
     with rs_col2:
@@ -231,9 +239,8 @@ with st.sidebar:
                 "4.3.5, managed parameter 12.5). Higher I spreads a burst error "
                 "across more codewords (each corrects a smaller share of it) at "
                 "the cost of a larger CADU."
-                + (" In CADU mode this must match how the uploaded CADUs were "
-                   "actually built, since it's used to work out each CADU's "
-                   "byte length." if is_cadu_input else "")
+                + (" With ASM-framed input this sets each record's length "
+                   "(4 + 255*I bytes, 1279 at I=5)." if is_cadu_input else "")
             ),
         )
     rs_k = 255 - 2 * rs_e
@@ -266,29 +273,39 @@ with st.sidebar:
         ),
     )
 
+    randomizer_options = {
+        "Long (131071-bit)": "long", "Short (255-bit, legacy)": "short", "None": "none",
+    }
+    if input_format == "asm_frame":
+        # The frames are known NOT to be scrambled yet: "None" would send
+        # them unscrambled and a real receiver's descrambler would corrupt
+        # every frame (the pipeline rejects it too).
+        randomizer_choices = ["Long (131071-bit)", "Short (255-bit, legacy)"]
+    elif input_format == "cadu":
+        # Already scrambled as on air: scrambling again would undo it.
+        randomizer_choices = ["None"]
+    else:
+        randomizer_choices = list(randomizer_options)
     randomizer_label = st.selectbox(
-        "Pseudo-randomizer", ["Long (131071-bit)", "Short (255-bit, legacy)", "None"],
+        "Pseudo-randomizer", randomizer_choices, disabled=input_format == "cadu",
         help=(
             "CCSDS section 10: scrambles the RS-coded data (never the ASM) to "
             "guarantee bit transitions, avoid spectral lines, and aid receiver "
             "acquisition. 'Long' is the current standard default (Issue 5, "
             "2023, managed parameter 12.3); 'Short' is kept only for backward "
             "compatibility with legacy systems."
-            + (" In CADU mode this is NOT assumed to already be applied to the "
-               "uploaded data: set it to match how these CADUs were actually "
-               "built. 'None' assumes the uploaded bytes are exactly as "
-               "they'd appear on the air right before convolutional coding "
-               "(already scrambled, if that system scrambles at all); pick "
-               "'Long'/'Short' instead if your source hands back already-"
-               "descrambled bytes (common for a capture/decode instrument that "
-               "does its own frame sync) -- otherwise a real receiver's own "
-               "descrambler will corrupt every frame." if is_cadu_input else "")
+            + (" With 'ASM + Transfer Frame (not scrambled)' input it is "
+               "always applied: pick the one the real link uses."
+               if input_format == "asm_frame" else "")
+            + (" Not applied to 'CADU as on air' input, which is already "
+               "scrambled." if input_format == "cadu" else "")
         ),
     )
-    randomizer = {"Long (131071-bit)": "long", "Short (255-bit, legacy)": "short", "None": "none"}[randomizer_label]
+    randomizer = randomizer_options[randomizer_label]
 
     st.markdown("### Payload & Duration")
-    file_upload_label = "CADU file" if is_cadu_input else "Transfer Frame file"
+    file_upload_label = {"transfer_frame": "Transfer Frame file", "asm_frame": "ASM + Transfer Frame file",
+                         "cadu": "CADU file"}[input_format]
     payload_mode = st.radio("Payload source", ["Pseudo-random", file_upload_label], horizontal=True)
     payload_source_bytes = None
     seed = 42
@@ -354,7 +371,7 @@ with st.sidebar:
                 )
     else:
         uploaded = st.file_uploader(
-            "CADU (binary)" if is_cadu_input else "Transfer Frame (binary)", type=None,
+            f"{file_upload_label} (binary)", type=None,
         )
         if uploaded is not None:
             payload_source_bytes = uploaded.read()
@@ -399,10 +416,10 @@ with st.sidebar:
                 if mismatch_at is not None:
                     pos, gap = mismatch_at
                     st.error(
-                        f"CADU length from RS(255,{rs_k}) x interleave {interleave_depth} is "
-                        f"{unit_bytes} bytes, but the next ASM in the file is only {gap} bytes "
-                        f"after the one at offset {sync_skipped_bytes + pos}. Check that E/"
-                        "interleave depth match how these CADUs were actually built."
+                        f"Record length from interleave depth {interleave_depth} is 4 + 255 x "
+                        f"{interleave_depth} = {unit_bytes} bytes, but the next ASM in the file "
+                        f"is only {gap} bytes after the one at offset {sync_skipped_bytes + pos}. "
+                        "Check that the interleave depth matches how this data was actually built."
                     )
                     st.stop()
                 usable_positions = [pos for pos in positions if pos + unit_bytes <= len(usable_bytes)]
@@ -692,11 +709,11 @@ with panel:
         return f'<span class="{cls}">{label}</span>'
 
     stages_html = '<div class="stage-row">' + '<span class="arrow">&rarr;</span>'.join([
-        chip("CADU (in)" if is_cadu_input else ("PAYLOAD +VC" if vcid_list is not None else "PAYLOAD"), True),
-        chip(f"RS(255,{rs_k}) I={interleave_depth}" + (" [in CADU]" if is_cadu_input else ""), fec_rs and not is_cadu_input),
+        chip({"asm_frame": "ASM+TF (in)", "cadu": "CADU (in)"}[input_format] if is_cadu_input else ("PAYLOAD +VC" if vcid_list is not None else "PAYLOAD"), True),
+        chip(f"RS(255,{rs_k}) I={interleave_depth}" + (" [in input]" if is_cadu_input else ""), fec_rs and not is_cadu_input),
         chip(f"+{corrupt_rs_symbols} ERR", corrupt_rs_symbols > 0),
         chip(randomizer_label.split(" ")[0].upper(), randomizer != "none"),
-        chip("+ASM" + (" [in CADU]" if is_cadu_input else ""), not is_cadu_input),
+        chip("+ASM" + (" [in input]" if is_cadu_input else ""), not is_cadu_input),
         chip(f"CONV K=7 r={conv_rate}", fec_conv),
         chip("NRZ-L", True),
         chip(f"{modulation} GRAY" if modulation == "QPSK" else modulation, True),

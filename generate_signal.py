@@ -9,13 +9,15 @@ K=7, rate 1/2 (or punctured to 2/3, 3/4, 5/6, 7/8) over the CADU stream
 (ASM included) -> NRZ-L -> QPSK (Gray) or BPSK -> RRC -> peak-normalize ->
 optional resample -> raw interleaved IQ (float32 or int16), no header.
 
-With --input-format cadu, the payload is instead treated as already-complete
-CADUs (ASM + RS-encoded): RS and the ASM prepend are skipped to avoid
-double-encoding. --randomizer still applies in this mode -- set it to match
-how the source CADUs were actually built (a captured/decoded source is
-often already de-scrambled and needs --randomizer set to re-scramble it, or
-a real receiver's descrambler will corrupt every frame); only leave it at
-"none" if the bytes are exactly as they'd appear on the air.
+With an ASM-framed --input-format, the payload already starts each record
+with the ASM, and RS and the ASM prepend are skipped to avoid double-
+encoding. Each record is exactly 4 + 255*I bytes (1279 at I=5); anything
+past that before the next ASM is receiver-added overhead and is skipped:
+  asm_frame  ASM + Transfer Frame, NOT scrambled (e.g. a ground station's
+             decoded output): the frame is scrambled here (never the ASM),
+             --randomizer long by default ('none' is rejected).
+  cadu       CADU exactly as on the air (already scrambled): used verbatim,
+             --randomizer must be 'none'.
 
 See README.md for architecture assumptions, limitations, and open TODOs
 before using the output against real ground equipment. For an interactive
@@ -28,7 +30,7 @@ import json
 import os
 
 from ccsds_chain.mapping import BITS_PER_SYMBOL
-from ccsds_chain.pipeline import ChainParams, export_chain
+from ccsds_chain.pipeline import ASM_FRAMED_INPUT_FORMATS, INPUT_FORMATS, ChainParams, export_chain
 from ccsds_chain.utils import resample_ratio
 
 # --------------------------------------------------------------------------
@@ -54,7 +56,7 @@ RANDOMIZER = "none"            # "none", "short" (255-bit, legacy), "long" (1310
 
 ASM = bytes.fromhex("1ACFFC1D")  # 4 bytes, uncoded
 
-INPUT_FORMAT = "transfer_frame"  # "transfer_frame" (default) or "cadu" (already ASM+RS encoded)
+INPUT_FORMAT = "transfer_frame"  # "transfer_frame" (default), "asm_frame" or "cadu" (see docstring)
 N_CADU = 100                   # number of CADUs to generate (signal duration)
 PAYLOAD_SOURCE = None          # path to a file with real Transfer Frames (or CADUs, if --input-format cadu), or None = pseudo-random
 PAYLOAD_SEED = 42              # seed for reproducibility of the pseudo-random payload
@@ -82,16 +84,19 @@ def build_cli():
     p.add_argument("--no-conv", action="store_true", help="disable convolutional FEC")
     p.add_argument("--conv-rate", choices=["1/2", "2/3", "3/4", "5/6", "7/8"], default=CONV_RATE)
     p.add_argument("--no-invert-g2", action="store_true")
-    p.add_argument("--randomizer", choices=["none", "short", "long"], default=RANDOMIZER,
+    p.add_argument("--randomizer", choices=["none", "short", "long"], default=None,
                     help="CCSDS pseudo-randomizer: 'long' (131071-bit, current standard default), "
-                         "'short' (255-bit, legacy), or 'none'. Also applies with --input-format "
-                         "cadu (not assumed to already be applied to that input -- see above)")
-    p.add_argument("--input-format", choices=["transfer_frame", "cadu"], default=INPUT_FORMAT,
+                         "'short' (255-bit, legacy), or 'none'. Default: 'long' with --input-format "
+                         f"asm_frame (where 'none' is rejected), otherwise '{RANDOMIZER}'. Must be "
+                         "'none' with --input-format cadu")
+    p.add_argument("--input-format", choices=list(INPUT_FORMATS), default=INPUT_FORMAT,
                     help="what --payload-source/the generated payload represents: 'transfer_frame' "
-                         "(raw, uncoded data -- RS/randomizer/ASM applied here, default) or 'cadu' "
-                         "(already complete CADUs -- ASM+RS are NOT re-applied, to avoid double-"
-                         "encoding; --randomizer still applies, and the convolutional stage still "
-                         "runs on it)")
+                         "(raw, uncoded data -- RS/randomizer/ASM applied here, default), "
+                         "'asm_frame' (ASM + Transfer Frame, NOT scrambled -- scrambled here, "
+                         "never the ASM) or 'cadu' (CADU exactly as on the air, already "
+                         "scrambled -- used verbatim). Neither ASM-framed format gets RS or a new "
+                         "ASM; each record is 4 + 255*I bytes, extra bytes before the next ASM "
+                         "are skipped. The convolutional stage still runs on all formats")
     p.add_argument("--payload-source", type=str, default=PAYLOAD_SOURCE)
     p.add_argument("--seed", type=int, default=PAYLOAD_SEED)
     p.add_argument("--vcid-list", type=str, default=None,
@@ -215,7 +220,8 @@ def main():
         fec_conv=FEC_CONV and not args.no_conv,
         conv_rate=args.conv_rate,
         conv_invert_g2=CONV_INVERT_G2 and not args.no_invert_g2,
-        randomizer=args.randomizer,
+        randomizer=args.randomizer if args.randomizer is not None
+                   else ("long" if args.input_format == "asm_frame" else RANDOMIZER),
         asm=ASM,
         input_format=args.input_format,
         n_cadu=args.n_cadu,
@@ -237,7 +243,7 @@ def main():
         pa_smoothness=args.pa_smoothness,
         pa_am_pm_deg_per_db=args.pa_am_pm_deg_per_db,
     )
-    is_cadu_input = params.input_format == "cadu"
+    is_cadu_input = params.input_format in ASM_FRAMED_INPUT_FORMATS
     unit_bytes = len(params.asm) + params.rs_n * params.interleave_depth if is_cadu_input else params.rs_k * params.interleave_depth
 
     print(f"[1/9] Payload generation: {params.n_cadu} CADU x {unit_bytes} bytes "
@@ -255,11 +261,14 @@ def main():
         print(f"       -> deterministic corruption: {params.corrupt_rs_symbols} symbol(s) flipped in "
               f"codeword {params.corrupt_codeword_index} of {' and '.join(target)}")
     if is_cadu_input:
-        print("[2/9] RS SKIPPED -- input already contains complete, RS-encoded CADUs")
-        print(f"[3/9] Pseudo-randomizer CCSDS ({params.randomizer}, excludes ASM) -- re-applied to the "
-              "already-formed CADUs, NOT assumed to already be there"
-              f"{'' if params.randomizer != 'none' else ' (SKIPPED)'}")
-        print("[4/9] ASM SKIPPED -- input already carries it per CADU")
+        print(f"[2/9] RS SKIPPED -- input already carries the {unit_bytes - len(params.asm)}-byte "
+              "block after each ASM")
+        if params.input_format == "asm_frame":
+            print(f"[3/9] Pseudo-randomizer CCSDS ({params.randomizer}, excludes ASM) -- applied to the "
+                  "input's not-yet-scrambled frames")
+        else:
+            print("[3/9] Pseudo-randomizer SKIPPED -- input CADUs are already as on the air")
+        print("[4/9] ASM SKIPPED -- input already carries it per record")
     else:
         print(f"[2/9] RS({params.rs_n},{params.rs_k}) E={params.rs_e} encode, interleave depth {params.interleave_depth}"
               f"{' (SKIPPED)' if not params.fec_rs else ''}")

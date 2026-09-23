@@ -55,28 +55,26 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
    via `--input-format` (or, in the GUI, "Payload contains"):
    - `transfer_frame` (default): raw, uncoded Transfer Frames. RS, the
      pseudo-randomizer and the ASM are all applied here to build the CADUs.
-   - `cadu`: already-complete CADUs (ASM + RS-encoded block) -- e.g. captured
-     or previously generated CADUs. RS and the ASM are **not** re-applied
-     (to avoid double-encoding and a second ASM in front of data that
-     already has one); only the convolutional stage (if enabled) is still
-     applied over the CADU stream, exactly as a physical coder downstream of
-     an already-formed CADU stream would.
+   - `asm_frame`: ASM + Transfer Frame, **not scrambled** -- what a ground
+     station that does its own frame sync hands back (e.g. Cortex, once its
+     per-record header/trailer is stripped). Confirmed against a real
+     capture, whose payload contained a plainly readable ASCII string (a
+     firmware version tag) that genuinely scrambled bytes could never
+     produce. RS and the ASM are **not** re-applied; the frame after each
+     ASM is scrambled here with `--randomizer` (never the ASM), which
+     defaults to `long` in this mode and cannot be `none` -- otherwise a
+     real, CCSDS-conformant receiver's descrambler would corrupt every
+     frame.
+   - `cadu`: CADUs exactly as on the air right before convolutional coding
+     (ASM + already-scrambled block, if the link scrambles). Used verbatim:
+     no RS, no scrambling (`--randomizer` must be `none`), no new ASM.
 
-     `--randomizer` still applies in this mode, and is **not** assumed to
-     already be baked into the input -- set it to match how the CADUs were
-     actually built. Leave it at `none` only if the bytes are exactly as
-     they'd appear on the air right before convolutional coding (already
-     scrambled, if that system scrambles at all). A captured/decoded CADU
-     source is often already *de*-scrambled as part of its own decoding --
-     confirmed against a real capture, whose CADU payload contained a
-     plainly readable ASCII string (a firmware version tag) that genuinely
-     scrambled/RS-coded bytes could never produce. Retransmitting such bytes
-     without re-scrambling them (`--randomizer none`) produces a signal a
-     real, CCSDS-conformant receiver's own descrambler will corrupt --
-     every frame gets rejected, not just some, since every frame passes
-     through the same broken assumption. Set `--randomizer` to whatever the
-     source system actually uses (`long` is the standard default since
-     2023) to fix this.
+     In both ASM-framed modes only the convolutional stage (if enabled) is
+     still applied over the record stream, exactly as a physical coder
+     downstream of an already-formed CADU stream would. Each record is
+     always exactly `4 + 255*I` bytes -- **1279** at the default I=5 --
+     and anything past that before the next ASM is receiver-added overhead
+     and is skipped (see below).
 
      A real/captured CADU file is not guaranteed to start exactly on a CADU
      boundary (unframed idle line-fill in front, or an excerpt starting
@@ -129,7 +127,7 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
      and `--corrupt-vc`, it also validates that a receiver's per-Virtual-
      Channel FER accounting attributes injected errors to the right
      channel and leaves the others untouched. Requires an actual RS-coded
-     region to corrupt (`--no-rs` not set, or `--input-format cadu`,
+     region to corrupt (`--no-rs` not set, or `--input-format asm_frame`/`cadu`,
      already RS-coded by construction).
 2. **Reed-Solomon**: RS(255,223) with E=16 (default) or RS(255,239) with
    E=8, interleaving at a selectable depth I=1,2,3,4,5,8 (byte `i` goes into
