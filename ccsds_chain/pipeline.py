@@ -15,7 +15,8 @@ from .scrambler import pn_sequence
 from .mapping import BITS_PER_SYMBOL, bits_to_nrzl, map_symbols
 from .pulse_shaping import rrc_taps, pulse_shape, RRCPulseShaper
 from .transfer_frame import PRIMARY_HEADER_BYTES, build_primary_header, vcid_schedule_counts
-from .impairments import apply_frequency_offset, apply_iq_imbalance, apply_pa_nonlinearity, PhaseNoiseGenerator
+from .impairments import (apply_doppler, apply_frequency_offset, apply_iq_imbalance,
+                           apply_pa_nonlinearity, PhaseNoiseGenerator)
 from .utils import (bytes_to_bits, find_all_cadu_positions, find_cadu_sync, generate_payload,
                      pack_iq_interleaved, resample_iq)
 
@@ -129,6 +130,18 @@ class ChainParams:
                                        # of AM-AM compression -- the same figure real TWTA/SSPA
                                        # datasheets quote. Only meaningful when pa_backoff_db is
                                        # set.
+    doppler_hz: float = 0.0  # 0 = disabled. Channel Doppler shift (not a transmitter
+                              # impairment -- see impairments.apply_doppler), at the start of
+                              # the whole exported signal (absolute sample 0): the
+                              # instantaneous frequency offset from relative spacecraft/
+                              # ground-station motion at closest approach or at the start of
+                              # a modeled pass segment, positive or negative.
+    doppler_rate_hz_s: float = 0.0  # 0 = disabled. Constant Doppler rate of change, in Hz/s --
+                                     # combined with doppler_hz as a local-linear (chirp)
+                                     # approximation of a real pass's Doppler curve, valid over
+                                     # the export's duration; for validating a receiver's
+                                     # carrier-tracking loop against a real LEO pass's dynamics,
+                                     # not just a static frequency error.
 
     @property
     def rs_k(self) -> int:
@@ -523,6 +536,8 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "pa_backoff_db": p.pa_backoff_db,
         "pa_smoothness": p.pa_smoothness if p.pa_backoff_db is not None else None,
         "pa_am_pm_deg_per_db": p.pa_am_pm_deg_per_db if p.pa_backoff_db is not None else None,
+        "doppler_hz": p.doppler_hz if p.doppler_hz != 0 else None,
+        "doppler_rate_hz_s": p.doppler_rate_hz_s if p.doppler_rate_hz_s != 0 else None,
     }
 
 
@@ -530,14 +545,16 @@ def _apply_impairments(
     iq: np.ndarray, p: ChainParams, sample_rate: float, start_sample: int,
     phase_noise_gen: Optional[PhaseNoiseGenerator],
 ) -> np.ndarray:
-    """Applies ChainParams' transmitter impairments to a chunk of
-    pulse-shaped IQ, in the order they originate along the real signal
-    path: LO frequency offset and phase noise, then IQ modulator gain/
-    phase imbalance, then PA nonlinearity last (the final physical stage
-    before the antenna, acting on whatever offset/noisy/imbalanced signal
-    reaches it). Skips a stage entirely when its parameter is at the
-    "disabled" value, so a run with none of them configured is bit-for-bit
-    identical to before this feature existed.
+    """Applies ChainParams' transmitter impairments, then its channel
+    Doppler, to a chunk of pulse-shaped IQ, in the order they originate
+    along the real signal path: LO frequency offset and phase noise, then
+    IQ modulator gain/phase imbalance, then PA nonlinearity (the final
+    transmitter-side stage, before the antenna), then Doppler last of all
+    -- imparted by the channel itself, after the signal has left the
+    antenna, so it acts on whatever the transmitter chain already produced
+    rather than the other way around. Skips a stage entirely when its
+    parameter is at the "disabled" value, so a run with none of them
+    configured is bit-for-bit identical to before this feature existed.
     `phase_noise_gen` is created once by the caller (None when disabled)
     and shared across every chunk of one export, so its random walk and
     PRNG state carry correctly across export_chain()'s batches;
@@ -569,6 +586,8 @@ def _apply_impairments(
         iq = apply_iq_imbalance(iq, p.iq_gain_imbalance_db, p.iq_phase_imbalance_deg)
     if p.pa_backoff_db is not None:
         iq = apply_pa_nonlinearity(iq, p.pa_backoff_db, p.pa_smoothness, p.pa_am_pm_deg_per_db)
+    if p.doppler_hz != 0 or p.doppler_rate_hz_s != 0:
+        iq = apply_doppler(iq, p.doppler_hz, p.doppler_rate_hz_s, sample_rate, start_sample=start_sample)
     return iq
 
 

@@ -11,6 +11,7 @@ import pytest
 
 from ccsds_chain.impairments import (
     PhaseNoiseGenerator,
+    apply_doppler,
     apply_frequency_offset,
     apply_iq_imbalance,
     apply_pa_nonlinearity,
@@ -61,6 +62,74 @@ class TestFrequencyOffset:
         whole = apply_frequency_offset(tone, 10_000.0, FS, start_sample=0)
         a = apply_frequency_offset(tone[:40_000], 10_000.0, FS, start_sample=0)
         b = apply_frequency_offset(tone[40_000:], 10_000.0, FS, start_sample=40_000)
+        assert np.array_equal(whole, np.concatenate([a, b]))
+
+
+class TestDoppler:
+    def test_disabled_is_exact_identity(self):
+        tone = _tone(50_000.0)
+        assert np.array_equal(apply_doppler(tone, 0.0, 0.0, FS), tone)
+
+    def test_zero_rate_matches_frequency_offset(self):
+        """With no Doppler rate, apply_doppler() is just a constant
+        frequency shift -- the same phase ramp apply_frequency_offset()
+        already implements."""
+        tone = _tone(50_000.0)
+        via_doppler = apply_doppler(tone, 10_000.0, 0.0, FS)
+        via_offset = apply_frequency_offset(tone, 10_000.0, FS)
+        assert np.allclose(via_doppler, via_offset)
+
+    def test_shifts_a_tone_at_start_by_the_configured_doppler(self):
+        f0, doppler = 50_000.0, 12_000.0
+        shifted = apply_doppler(_tone(f0), doppler, 0.0, FS)
+        assert _fft_peak_freq(shifted) == pytest.approx(f0 + doppler, abs=1.0)
+
+    def test_doppler_rate_sweeps_instantaneous_frequency_linearly(self):
+        """A nonzero rate makes this a chirp: the instantaneous frequency
+        at time t must be doppler_hz + doppler_rate_hz_s*t. Checked by
+        taking the FFT peak of two short, non-overlapping windows near the
+        start and near the end of a long tone, and comparing the observed
+        frequency change against the configured rate times the time
+        between the two windows' centers."""
+        f0, doppler, rate = 0.0, 5_000.0, 20_000.0  # 20 kHz/s
+        n = 500_000  # 0.5 s at FS
+        tone = _tone(f0, n=n)
+        chirped = apply_doppler(tone, doppler, rate, FS)
+
+        win = 5_000
+        early = chirped[:win]
+        late = chirped[-win:]
+        f_early = _fft_peak_freq(early, fs=FS)
+        f_late = _fft_peak_freq(late, fs=FS)
+
+        t_early_center = (win / 2) / FS
+        t_late_center = (n - win / 2) / FS
+        expected_delta = rate * (t_late_center - t_early_center)
+        # Tolerance set by the windows' own FFT bin resolution (FS/win =
+        # 200 Hz/bin here), not measurement noise -- both readings are
+        # exact peak bins of a noiseless tone.
+        assert (f_late - f_early) == pytest.approx(expected_delta, abs=FS / win + 50.0)
+
+    def test_negative_rate_sweeps_down(self):
+        f0, doppler, rate = 0.0, 30_000.0, -40_000.0
+        n = 500_000
+        tone = _tone(f0, n=n)
+        chirped = apply_doppler(tone, doppler, rate, FS)
+        win = 5_000
+        f_early = _fft_peak_freq(chirped[:win], fs=FS)
+        f_late = _fft_peak_freq(chirped[-win:], fs=FS)
+        assert f_late < f_early
+
+    def test_exact_regardless_of_chunking(self):
+        """Same cross-batch-consistency contract as
+        apply_frequency_offset(): a per-sample phase ramp computed from
+        absolute position, not accumulated, so splitting the signal into
+        chunks with the correct start_sample must reproduce the unchunked
+        result exactly."""
+        tone = _tone(50_000.0)
+        whole = apply_doppler(tone, 10_000.0, 5_000.0, FS, start_sample=0)
+        a = apply_doppler(tone[:40_000], 10_000.0, 5_000.0, FS, start_sample=0)
+        b = apply_doppler(tone[40_000:], 10_000.0, 5_000.0, FS, start_sample=40_000)
         assert np.array_equal(whole, np.concatenate([a, b]))
 
 

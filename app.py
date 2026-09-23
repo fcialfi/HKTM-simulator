@@ -626,6 +626,39 @@ with st.sidebar:
             active.append(pa_desc)
         st.caption("Active: " + ", ".join(active) if active else "Enabled, but all values are still 0 -- no effect yet.")
 
+    st.markdown("### Channel")
+    enable_doppler = st.checkbox(
+        "Enable Doppler",
+        help=(
+            "Doppler shift and Doppler rate from relative motion between "
+            "spacecraft and ground station during a real pass -- unlike the "
+            "Transmitter Impairments above, this is a channel/propagation "
+            "effect, applied last of all (after the antenna, not before it). "
+            "A local-linear (chirp) approximation, for validating a "
+            "receiver's carrier-tracking loop against realistic pass "
+            "dynamics rather than just a static frequency error."
+        ),
+    )
+    doppler_hz = 0.0
+    doppler_rate_hz_s = 0.0
+    if enable_doppler:
+        dop_col1, dop_col2 = st.columns(2)
+        with dop_col1:
+            doppler_hz = st.number_input(
+                "Doppler shift (Hz)", value=0.0, step=1000.0,
+                help="Instantaneous Doppler shift at the start of the exported signal.",
+            )
+        with dop_col2:
+            doppler_rate_hz_s = st.number_input(
+                "Doppler rate (Hz/s)", value=0.0, step=10.0,
+                help="Constant Doppler rate of change -- negative while the spacecraft "
+                     "is approaching, positive while receding.",
+            )
+        if doppler_hz != 0 or doppler_rate_hz_s != 0:
+            st.caption(f"Active: {doppler_hz:+.0f} Hz, rate {doppler_rate_hz_s:+.1f} Hz/s")
+        else:
+            st.caption("Enabled, but both values are still 0 -- no effect yet.")
+
 # --------------------------------------------------------------------------
 # Build params & run chain
 # --------------------------------------------------------------------------
@@ -663,6 +696,8 @@ params = ChainParams(
     pa_backoff_db=float(pa_backoff_db) if enable_pa else None,
     pa_smoothness=float(pa_smoothness),
     pa_am_pm_deg_per_db=float(pa_am_pm_deg_per_db),
+    doppler_hz=float(doppler_hz),
+    doppler_rate_hz_s=float(doppler_rate_hz_s),
 )
 
 panel = st.container(border=True)
@@ -703,6 +738,7 @@ with panel:
         chip(f"RRC &alpha;={rrc_alpha:.2f}", True),
         chip("TX IMPAIR", freq_offset_hz != 0 or iq_gain_imbalance_db != 0
              or iq_phase_imbalance_deg != 0 or phase_noise_linewidth_hz > 0 or enable_pa),
+        chip("DOPPLER", doppler_hz != 0 or doppler_rate_hz_s != 0),
     ]) + '</div>'
     st.markdown(stages_html, unsafe_allow_html=True)
 

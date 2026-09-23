@@ -150,6 +150,18 @@ def build_cli():
     p.add_argument("--impairment-seed", type=int, default=2718,
                     help="seed for the phase noise random walk -- deterministic and "
                          "reproducible across runs")
+    p.add_argument("--doppler-hz", type=float, default=0.0,
+                    help="channel Doppler shift, in Hz, at the start of the exported "
+                         "signal (not a transmitter impairment -- applied last, after the "
+                         "transmitter chain, since it's imparted by relative spacecraft/"
+                         "ground-station motion along the propagation path); positive or "
+                         "negative; default: 0 (disabled)")
+    p.add_argument("--doppler-rate-hz-s", type=float, default=0.0,
+                    help="constant Doppler rate of change, in Hz/s -- combined with "
+                         "--doppler-hz as a local-linear (chirp) approximation of a real "
+                         "LEO pass's Doppler curve, for validating a receiver's carrier-"
+                         "tracking loop against realistic pass dynamics, not just a static "
+                         "frequency error; default: 0 (disabled)")
     p.add_argument("--pa-backoff-db", type=float, default=None,
                     help="power amplifier saturation point (Rapp AM-AM model), in dB above "
                          "this project's reference unit amplitude (1.0, an ideal symbol's own "
@@ -236,6 +248,8 @@ def main():
         pa_backoff_db=args.pa_backoff_db,
         pa_smoothness=args.pa_smoothness,
         pa_am_pm_deg_per_db=args.pa_am_pm_deg_per_db,
+        doppler_hz=args.doppler_hz,
+        doppler_rate_hz_s=args.doppler_rate_hz_s,
     )
     is_cadu_input = params.input_format == "cadu"
     unit_bytes = len(params.asm) + params.rs_n * params.interleave_depth if is_cadu_input else params.rs_k * params.interleave_depth
@@ -287,6 +301,9 @@ def main():
         impairments.append(pa_desc)
     if impairments:
         print(f"       -> transmitter impairments: {', '.join(impairments)}")
+    if params.doppler_hz != 0 or params.doppler_rate_hz_s != 0:
+        print(f"       -> channel Doppler: {params.doppler_hz:+.1f} Hz, "
+              f"rate {params.doppler_rate_hz_s:+.2f} Hz/s")
 
     native_fs = params.symbol_rate * params.sps
     output_fs = args.target_fs if (args.target_fs is not None and args.target_fs != native_fs) else native_fs

@@ -219,6 +219,18 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
    symbols -- e.g. a nonzero phase noise linewidth visibly spreads the 4
    QPSK points into a ring (constant-magnitude phase rotation), rather than
    always showing a perfect, unaffected constellation.
+9b. **Channel Doppler** (optional, disabled by default -- `--doppler-hz` /
+   `--doppler-rate-hz-s` on the CLI), applied last of all, after every
+   transmitter impairment above: unlike those, this is not a transmitter
+   non-ideality but a propagation effect, from relative motion between
+   spacecraft and ground station during a real pass. `doppler_hz` is the
+   instantaneous shift at the start of the exported signal; `doppler_rate_hz_s`
+   is its constant rate of change (Hz/s) -- together a local-linear (chirp)
+   approximation of a real LEO pass's Doppler curve, for validating a
+   receiver's carrier-tracking loop against realistic pass dynamics rather
+   than just a static frequency error. Implemented as a quadratic phase ramp
+   (`impairments.apply_doppler()`), exact and reproducible across
+   `export_chain()`'s batches like `--freq-offset-hz`.
 10. **Normalization**: the final signal is scaled to a configurable
     normalized peak amplitude (default 0.9 on a [-1,+1] scale), to leave
     headroom and prevent saturation/clipping during RF playback.
@@ -313,6 +325,12 @@ python generate_signal.py --freq-offset-hz 5000 --iq-gain-imbalance-db 0.8 \
 # PA driven 6 dB into saturation, with 3 deg/dB AM-PM -- check the receiver
 # tolerates the resulting spectral regrowth/EVM degradation
 python generate_signal.py --pa-backoff-db -6 --pa-smoothness 3 --pa-am-pm-deg-per-db 3 -o test8.raw
+
+# A real LEO pass: 30 kHz Doppler shift at export start, closing at -400 Hz/s
+# -- validates carrier tracking against realistic pass dynamics, not just a
+# static frequency error (this is a channel effect, not a transmitter one --
+# combine freely with the transmitter impairments above)
+python generate_signal.py --doppler-hz 30000 --doppler-rate-hz-s -400 -o test9.raw
 
 python verify_spectrum.py output/qpsk_ccsds_....iq --plot spectrum.png
 ```
