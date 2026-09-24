@@ -123,15 +123,13 @@ class TestCaduInputSync:
             pipeline._prepare_payload(full_p)
 
 
-class TestCaduInputRandomizer:
-    """CADU input isn't assumed to already be scrambled: `randomizer` must
-    keep controlling whether the RS-coded region gets (re-)scrambled even
-    in "cadu" input_format, the same as in "transfer_frame" mode. Before
-    this was fixed, CADU input unconditionally forced the randomizer off
-    (`pn = None` regardless of `p.randomizer`), so a captured/decoded CADU
-    source that was already de-scrambled (e.g. by the capture instrument's
-    own frame sync) could never be re-scrambled for retransmission -- a
-    real receiver's own descrambler would then corrupt every frame."""
+class TestAsmFramedInputRandomizer:
+    """The two ASM-framed input formats differ only in scrambling:
+    "asm_frame" is ASM + a Transfer Frame that is NOT scrambled yet (what a
+    ground station such as Cortex hands back once its per-record overhead
+    is stripped), so the block after the ASM gets scrambled here -- never
+    the ASM; "cadu" is already exactly as on the air, so it is used
+    verbatim. Each enforces the matching `randomizer`."""
 
     @staticmethod
     def _source(p, body_byte=0x42):
@@ -139,7 +137,23 @@ class TestCaduInputRandomizer:
         cadu = p.asm + bytes([body_byte]) * (unit_bytes - len(p.asm))
         return cadu, unit_bytes
 
-    def test_randomizer_none_leaves_cadu_bits_unchanged(self):
+    def test_record_is_1279_bytes_at_default_interleave_depth(self):
+        for input_format, randomizer in [("asm_frame", "long"), ("cadu", "none")]:
+            p = ChainParams(input_format=input_format, randomizer=randomizer)
+            assert pipeline._unit_bytes(p)[1] == 1279
+
+    def test_extra_bytes_after_each_record_are_skipped(self):
+        p = _small_params(input_format="asm_frame", randomizer="long")
+        cadu, unit_bytes = self._source(p)
+        trailer = b"\xee" * 37  # receiver-added overhead, never transmitted
+        source = cadu + trailer + cadu + trailer
+        full_p = ChainParams(**{**p.__dict__, "payload_bytes": source, "n_cadu": 2})
+        prep = pipeline._prepare_payload(full_p)
+        assert prep.n_synced_cadu == 2
+        assert prep.cadu_wrapper_min_bytes == 37
+        assert np.array_equal(pipeline._cadu_bits(full_p, prep, 0), pipeline._cadu_bits(full_p, prep, 1))
+
+    def test_cadu_is_used_verbatim(self):
         p = _small_params(input_format="cadu", rs_e=8, interleave_depth=1, randomizer="none")
         cadu, _ = self._source(p)
         full_p = ChainParams(**{**p.__dict__, "payload_bytes": cadu, "n_cadu": 1})
@@ -148,45 +162,49 @@ class TestCaduInputRandomizer:
         assert np.array_equal(pipeline._cadu_bits(full_p, prep, 0), bytes_to_bits(cadu))
 
     @pytest.mark.parametrize("randomizer", ["short", "long"])
-    def test_randomizer_scrambles_rs_region_not_asm(self, randomizer):
-        p = _small_params(input_format="cadu", rs_e=8, interleave_depth=1, randomizer=randomizer)
-        cadu, _ = self._source(p)
+    def test_asm_frame_scrambles_frame_not_asm(self, randomizer):
+        from ccsds_chain.scrambler import pn_sequence
+        from ccsds_chain.utils import bytes_to_bits
+        p = _small_params(input_format="asm_frame", rs_e=8, interleave_depth=1, randomizer=randomizer)
+        cadu, unit_bytes = self._source(p)
         full_p = ChainParams(**{**p.__dict__, "payload_bytes": cadu, "n_cadu": 1})
         prep = pipeline._prepare_payload(full_p)
         bits = pipeline._cadu_bits(full_p, prep, 0)
-        from ccsds_chain.utils import bytes_to_bits
         asm_bit_len = len(p.asm) * 8
         original_bits = bytes_to_bits(cadu)
         assert np.array_equal(bits[:asm_bit_len], original_bits[:asm_bit_len])  # ASM untouched
-        assert not np.array_equal(bits[asm_bit_len:], original_bits[asm_bit_len:])  # RS region scrambled
+        pn = pn_sequence((unit_bytes - len(p.asm)) * 8, randomizer)
+        assert np.array_equal(bits[asm_bit_len:], original_bits[asm_bit_len:] ^ pn)  # frame scrambled
 
-    def test_meta_reports_actual_randomizer_not_forced_none(self):
-        p = _small_params(input_format="cadu", rs_e=8, interleave_depth=1, randomizer="long")
+    def test_asm_frame_rejects_no_randomizer(self):
+        with pytest.raises(ValueError, match="NOT scrambled"):
+            run_chain(_small_params(input_format="asm_frame", randomizer="none"))
+
+    @pytest.mark.parametrize("randomizer", ["short", "long"])
+    def test_cadu_rejects_randomizer(self, randomizer):
+        with pytest.raises(ValueError, match="already exactly as on the air"):
+            run_chain(_small_params(input_format="cadu", randomizer=randomizer))
+
+    def test_meta_reports_randomizer(self):
+        p = _small_params(input_format="asm_frame", rs_e=8, interleave_depth=1, randomizer="long")
         cadu, _ = self._source(p)
         full_p = ChainParams(**{**p.__dict__, "payload_bytes": cadu, "n_cadu": 1})
         result = run_chain(full_p)
         assert result.meta["randomizer"] == "long"
+        assert result.meta["input_format"] == "asm_frame"
 
-    def test_scrambling_is_reversible_via_the_same_pn_sequence(self):
-        """Round-trip sanity check: XOR-ing an already-scrambled CADU's
-        RS region with the same PN sequence again recovers the original
-        bytes -- confirms _cadu_bits() scrambles with a plain XOR (as
-        CCSDS section 10 specifies), not something order-dependent."""
-        p = _small_params(input_format="cadu", rs_e=8, interleave_depth=1, randomizer="long")
-        cadu, _ = self._source(p, body_byte=0x99)
-        full_p = ChainParams(**{**p.__dict__, "payload_bytes": cadu, "n_cadu": 1})
-        prep = pipeline._prepare_payload(full_p)
-        scrambled_bits = pipeline._cadu_bits(full_p, prep, 0)
-
-        # Feed the now-scrambled CADU back in as a fresh "already on-air"
-        # source with the same randomizer: scrambling it again must undo
-        # the first pass and recover the original bytes.
-        scrambled_cadu = np.packbits(scrambled_bits, bitorder="big").tobytes()
-        full_p2 = ChainParams(**{**p.__dict__, "payload_bytes": scrambled_cadu, "n_cadu": 1})
-        prep2 = pipeline._prepare_payload(full_p2)
-        round_tripped_bits = pipeline._cadu_bits(full_p2, prep2, 0)
-        from ccsds_chain.utils import bytes_to_bits
-        assert np.array_equal(round_tripped_bits, bytes_to_bits(cadu))
+    def test_asm_frame_output_equals_cadu_of_prescrambled_input(self):
+        """Scrambling an "asm_frame" source here must give exactly the
+        signal of the same data pre-scrambled and fed as an on-air "cadu"."""
+        from ccsds_chain.scrambler import pn_sequence
+        p = _small_params(input_format="asm_frame", rs_e=8, interleave_depth=1, randomizer="long")
+        cadu, unit_bytes = self._source(p, body_byte=0x99)
+        pn_bytes = np.packbits(pn_sequence((unit_bytes - len(p.asm)) * 8, "long")).tobytes()
+        on_air = p.asm + bytes(a ^ b for a, b in zip(cadu[len(p.asm):], pn_bytes))
+        a = run_chain(ChainParams(**{**p.__dict__, "payload_bytes": cadu * 3, "n_cadu": 3}))
+        b = run_chain(ChainParams(**{**p.__dict__, "input_format": "cadu", "randomizer": "none",
+                                     "payload_bytes": on_air * 3, "n_cadu": 3}))
+        assert np.array_equal(a.iq, b.iq)
 
 
 class TestVirtualChannelFraming:
