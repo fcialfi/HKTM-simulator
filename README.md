@@ -12,6 +12,7 @@ ECSS-E-ST-50-01C.
 app.py                  GUI (Streamlit) with real-time spectrum/constellation
 generate_signal.py      CLI, generates output_iq.raw + metadata
 verify_spectrum.py      CLI, checks the occupied bandwidth of an existing IQ file
+analyze_recording.py    CLI, analyzes a real recorded downlink (.rfcatcher or raw IQ)
 ccsds_chain/
   pipeline.py            chain orchestration (used by app.py and generate_signal.py)
   reed_solomon.py         RS(255,223)/(255,239), CCSDS-native GF(256) and dual-basis
@@ -338,6 +339,29 @@ most common options are also exposed via the CLI (`--help`), including
 output format ones (`--dtype`, `--peak`, `--target-fs`). If `-o`/`--output`
 is not given, the file is saved to `output/` as
 `qpsk_ccsds_<fs>Msps_<n_cadu>cadu_<timestamp>.iq`.
+
+### Analyzing a real recording
+
+`analyze_recording.py` characterizes a real recorded pass (RF-Catcher
+`.rfcatcher` files are tar archives around an int16 IQ member and are
+unwrapped automatically; raw IQ works too), so a simulated signal can be
+matched to it or a receiver problem traced back to the signal:
+
+```bash
+python analyze_recording.py C:\RF-Catcher\AWS_2_split.rfcatcher --fs 10e6 \
+    --offset 30 --duration 1 --plot aws2.png
+```
+
+It reports the symbol rate (and its ppm offset from `--rs-nominal`), the
+carrier offset and drift, how many discrete spectral lines sit on the
+signal, Es/N0, IQ imbalance and residual phase noise, then Viterbi-decodes
+the symbols to find the CADU length, the pseudo-randomizer in use
+(none/short/long, checked against the TM primary header), SCID/VCIDs, the
+share of idle frames, and how repetitive the on-air content is. The PNG
+shows the spectrum, the constellation after carrier recovery and the
+residual carrier phase. Only `--duration` seconds from `--offset` are read
+(memory-mapped), so multi-GB recordings are fine; decoding is pure Python
+and takes about a minute per million symbols (`--no-decode` to skip it).
 
 ### Tests
 

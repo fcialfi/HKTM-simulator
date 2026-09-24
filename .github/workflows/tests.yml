@@ -25,7 +25,7 @@ jobs:
       # positives, unlike a style linter -- so a failure here is always worth
       # looking at, never a formatting-opinion argument.
       - name: pyflakes
-        run: python -m pyflakes app.py generate_signal.py verify_spectrum.py ccsds_chain tests
+        run: python -m pyflakes app.py generate_signal.py verify_spectrum.py analyze_recording.py ccsds_chain tests
 
   test:
     runs-on: ubuntu-latest
