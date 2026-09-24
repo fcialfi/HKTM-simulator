@@ -62,9 +62,9 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
      firmware version tag) that genuinely scrambled bytes could never
      produce. RS and the ASM are **not** re-applied; the frame after each
      ASM is scrambled here with `--randomizer` (never the ASM), which
-     defaults to `long` in this mode and cannot be `none` -- otherwise a
-     real, CCSDS-conformant receiver's descrambler would corrupt every
-     frame.
+     defaults to `short` (legacy 255-bit) in this mode and cannot be
+     `none` -- otherwise a real, CCSDS-conformant receiver's descrambler
+     would corrupt every frame.
    - `cadu`: CADUs exactly as on the air right before convolutional coding
      (ASM + already-scrambled block, if the link scrambles). Used verbatim:
      no RS, no scrambling (`--randomizer` must be `none`), no new ASM.

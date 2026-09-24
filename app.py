@@ -280,7 +280,7 @@ with st.sidebar:
         # The frames are known NOT to be scrambled yet: "None" would send
         # them unscrambled and a real receiver's descrambler would corrupt
         # every frame (the pipeline rejects it too).
-        randomizer_choices = ["Long (131071-bit)", "Short (255-bit, legacy)"]
+        randomizer_choices = ["Short (255-bit, legacy)", "Long (131071-bit)"]
     elif input_format == "cadu":
         # Already scrambled as on air: scrambling again would undo it.
         randomizer_choices = ["None"]

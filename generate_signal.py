@@ -15,7 +15,7 @@ encoding. Each record is exactly 4 + 255*I bytes (1279 at I=5); anything
 past that before the next ASM is receiver-added overhead and is skipped:
   asm_frame  ASM + Transfer Frame, NOT scrambled (e.g. a ground station's
              decoded output): the frame is scrambled here (never the ASM),
-             --randomizer long by default ('none' is rejected).
+             --randomizer short (legacy 255-bit) by default ('none' is rejected).
   cadu       CADU exactly as on the air (already scrambled): used verbatim,
              --randomizer must be 'none'.
 
@@ -86,7 +86,7 @@ def build_cli():
     p.add_argument("--no-invert-g2", action="store_true")
     p.add_argument("--randomizer", choices=["none", "short", "long"], default=None,
                     help="CCSDS pseudo-randomizer: 'long' (131071-bit, current standard default), "
-                         "'short' (255-bit, legacy), or 'none'. Default: 'long' with --input-format "
+                         "'short' (255-bit, legacy), or 'none'. Default: 'short' with --input-format "
                          f"asm_frame (where 'none' is rejected), otherwise '{RANDOMIZER}'. Must be "
                          "'none' with --input-format cadu")
     p.add_argument("--input-format", choices=list(INPUT_FORMATS), default=INPUT_FORMAT,
@@ -221,7 +221,7 @@ def main():
         conv_rate=args.conv_rate,
         conv_invert_g2=CONV_INVERT_G2 and not args.no_invert_g2,
         randomizer=args.randomizer if args.randomizer is not None
-                   else ("long" if args.input_format == "asm_frame" else RANDOMIZER),
+                   else ("short" if args.input_format == "asm_frame" else RANDOMIZER),
         asm=ASM,
         input_format=args.input_format,
         n_cadu=args.n_cadu,
