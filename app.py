@@ -4,7 +4,8 @@
 Graphical interface for generating the CCSDS test signal (baseline QPSK)
 for injection via RF-Catcher (TestTree) Capture & Playback. Every parameter
 change recomputes the chain and updates the spectrum, constellation and
-metrics in real time.
+metrics in real time. A second panel analyzes a real recorded pass
+(see analyze_recording.py) and can copy what it measures into the generator.
 
 Usage: streamlit run app.py
 """
@@ -23,6 +24,7 @@ from ccsds_chain.pipeline import ASM, ASM_FRAMED_INPUT_FORMATS, ChainParams, exp
 from ccsds_chain.pulse_shaping import matched_filter_sample, rrc_taps
 from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
+from analyze_recording import analyze, report_lines
 
 # Exported IQ files are written here (same convention as generate_signal.py's
 # CLI default) rather than held fully in memory: export_chain() streams
@@ -36,6 +38,13 @@ EXPORT_DIR = "output"
 # would reintroduce the same peak-memory problem export_chain() avoids for
 # generation, just at download time instead.
 _DOWNLOAD_BUTTON_SIZE_LIMIT = 1 * 1024 ** 3
+
+# "Payload contains" choices -> ChainParams.input_format.
+INPUT_FORMAT_OPTIONS = {
+    "Transfer Frame (unencoded)": "transfer_frame",
+    "ASM + Transfer Frame (not scrambled)": "asm_frame",
+    "CADU as on air (already scrambled)": "cadu",
+}
 
 st.set_page_config(
     page_title="HKTM CCSDS Signal Generator",
@@ -140,7 +149,7 @@ div[data-testid="stExpander"] { background: rgba(255,255,255,0.02); border: 1px 
 with st.sidebar:
     st.markdown("### Modulation & Encoding")
     modulation = st.selectbox(
-        "Modulation", ["QPSK", "BPSK"],
+        "Modulation", ["QPSK", "BPSK"], key="modulation",
         help=(
             "QPSK (baseline): 2 bits/symbol, 1 CCSDS-native RS/interleave-compatible "
             "chain. BPSK: 1 bit/symbol -- half the bit rate at the same symbol rate/"
@@ -154,7 +163,7 @@ with st.sidebar:
 
     bits_per_symbol = BITS_PER_SYMBOL[modulation]
     rate_ref = st.radio(
-        "Rate input", ["Symbol rate", "Bit rate"], horizontal=True,
+        "Rate input", ["Symbol rate", "Bit rate"], horizontal=True, key="rate_ref",
         help=(
             "Symbol rate and bit rate aren't independent: for a given modulation "
             f"(here {modulation} = {bits_per_symbol} bits/symbol), bit rate = symbol rate x "
@@ -163,7 +172,10 @@ with st.sidebar:
         ),
     )
     if rate_ref == "Symbol rate":
-        symbol_rate = st.number_input("Symbol rate (S/s)", value=1_785_000, step=1_000, format="%d")
+        # Default set through session_state (not value=) so "Apply to
+        # generator" in the recording analysis can overwrite it cleanly.
+        st.session_state.setdefault("symbol_rate_input", 1_785_000)
+        symbol_rate = st.number_input("Symbol rate (S/s)", step=1_000, format="%d", key="symbol_rate_input")
         bit_rate = symbol_rate * bits_per_symbol
         st.caption(f"Bit rate (derived): {bit_rate:,.0f} bps".replace(",", " "))
     else:
@@ -172,13 +184,8 @@ with st.sidebar:
         st.caption(f"Symbol rate (derived): {symbol_rate:,.0f} S/s".replace(",", " "))
 
     st.markdown("### Input")
-    input_format_options = {
-        "Transfer Frame (unencoded)": "transfer_frame",
-        "ASM + Transfer Frame (not scrambled)": "asm_frame",
-        "CADU as on air (already scrambled)": "cadu",
-    }
     input_format_label = st.radio(
-        "Payload contains", list(input_format_options),
+        "Payload contains", list(INPUT_FORMAT_OPTIONS), key="input_format_label",
         help=(
             "What the payload below actually is. 'Transfer Frame' is raw, "
             "uncoded data: RS, the pseudo-randomizer and the ASM are all "
@@ -197,7 +204,7 @@ with st.sidebar:
             "stage below (if enabled) is still applied."
         ),
     )
-    input_format = input_format_options[input_format_label]
+    input_format = INPUT_FORMAT_OPTIONS[input_format_label]
     is_cadu_input = input_format in ASM_FRAMED_INPUT_FORMATS
     if input_format == "asm_frame":
         st.caption(
@@ -286,8 +293,16 @@ with st.sidebar:
         randomizer_choices = ["None"]
     else:
         randomizer_choices = list(randomizer_options)
+    # Changing the input format restores that format's default randomizer
+    # (its first choice), unless the value was just set by "Apply to
+    # generator", which records the format it applied it for. A value not
+    # offered for this format is dropped instead of letting Streamlit reject it.
+    if (st.session_state.get("_randomizer_format", input_format) != input_format
+            or st.session_state.get("randomizer_label") not in randomizer_choices):
+        st.session_state.pop("randomizer_label", None)
+    st.session_state["_randomizer_format"] = input_format
     randomizer_label = st.selectbox(
-        "Pseudo-randomizer", randomizer_choices, disabled=input_format == "cadu",
+        "Pseudo-randomizer", randomizer_choices, disabled=input_format == "cadu", key="randomizer_label",
         help=(
             "CCSDS section 10: scrambles the RS-coded data (never the ASM) to "
             "guarantee bit transitions, avoid spectral lines, and aid receiver "
@@ -547,7 +562,7 @@ with st.sidebar:
 
     st.markdown("### Transmitter Impairments")
     enable_impairments = st.checkbox(
-        "Enable typical transmitter impairments",
+        "Enable typical transmitter impairments", key="enable_impairments",
         help=(
             "Applies real-transmitter non-idealities to the pulse-shaped IQ -- "
             "distinct from a replayer's AWGN (which characterizes receiver "
@@ -570,8 +585,9 @@ with st.sidebar:
     pa_am_pm_deg_per_db = 0.0
     if enable_impairments:
         st.markdown("**LO / Synthesizer**")
+        st.session_state.setdefault("freq_offset_hz", 0.0)
         freq_offset_hz = st.number_input(
-            "Frequency offset (Hz)", value=0.0, step=100.0,
+            "Frequency offset (Hz)", step=100.0, key="freq_offset_hz",
             help="Constant residual LO frequency offset, positive or negative.",
         )
         phase_noise_linewidth_hz = st.number_input(
@@ -716,6 +732,173 @@ params = ChainParams(
     doppler_hz=float(doppler_hz),
     doppler_rate_hz_s=float(doppler_rate_hz_s),
 )
+
+# --------------------------------------------------------------------------
+# Real recording analysis
+# --------------------------------------------------------------------------
+_PLOT_LAYOUT = dict(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(l=10, r=10, t=40, b=10), showlegend=False)
+_GRID = dict(gridcolor="rgba(255,255,255,0.06)")
+
+
+def _apply_analysis_to_generator():
+    """Button callback: copy the measured parameters ticked under
+    "Reproduce it in the generator" into the sidebar widgets. Runs before
+    the next script run, the only point at which Streamlit lets widget
+    values be set programmatically; reads the checkboxes from session state
+    (not button args, which would be frozen at the last render)."""
+    ss = st.session_state
+    r = ss["recording_analysis"]
+    apply_rs, apply_modulation = ss.get("apply_rs", False), ss.get("apply_mod", False)
+    apply_randomizer, apply_carrier = ss.get("apply_rand", False), ss.get("apply_fc", False)
+    if apply_rs:
+        st.session_state["rate_ref"] = "Symbol rate"
+        # Rounded to 50 Hz so resampling to the recorder's sample rate stays
+        # an exact, tractable integer ratio (at most 14 ppm away).
+        st.session_state["symbol_rate_input"] = int(round(r["rs"] / 50) * 50)
+    if apply_modulation:
+        st.session_state["modulation"] = r["modulation"]
+    frames = r.get("frames") or {}
+    if apply_randomizer and "randomizer" in frames:
+        label = {"long": "Long (131071-bit)", "short": "Short (255-bit, legacy)", "none": "None"}[frames["randomizer"]]
+        fmt_label = ss.get("input_format_label", next(iter(INPUT_FORMAT_OPTIONS)))
+        if frames["randomizer"] != "none" and INPUT_FORMAT_OPTIONS[fmt_label] == "cadu":
+            # On-air CADU input can't carry a randomizer.
+            fmt_label = ss["input_format_label"] = "ASM + Transfer Frame (not scrambled)"
+        ss["randomizer_label"] = label
+        ss["_randomizer_format"] = INPUT_FORMAT_OPTIONS[fmt_label]
+    if apply_carrier:
+        st.session_state["enable_impairments"] = True
+        st.session_state["freq_offset_hz"] = float(round(r["fc"]))
+
+
+with st.expander("Analyze a real recording", expanded="recording_analysis" in st.session_state):
+    st.caption(
+        "Characterizes a recorded pass (RF-Catcher .rfcatcher or raw IQ): symbol rate, carrier offset "
+        "and drift, spectral lines, Es/N0, IQ imbalance, phase noise, then decodes it to find the "
+        "CADU length, pseudo-randomizer, SCID/VCIDs and idle-frame share. The file is read straight "
+        "from disk (not uploaded) and only the chosen slice is loaded, so multi-GB recordings are fine."
+    )
+    rec_path = st.text_input(
+        "Recording file path", key="rec_path", placeholder=r"C:\RF-Catcher\AWS_2_split.rfcatcher",
+        help="Full path on this computer. In Windows Explorer: Shift + right-click the file -> 'Copy as path'.",
+    ).strip().strip('"').strip("'")
+    ra1, ra2, ra3, ra4 = st.columns(4)
+    with ra1:
+        rec_fs = st.number_input("Recording sample rate (Hz)", min_value=1.0, value=10_000_000.0,
+                                 step=1e6, format="%.0f", key="rec_fs")
+    with ra2:
+        rec_offset = st.number_input("Start at (s)", min_value=0.0, value=0.0, step=1.0, key="rec_offset")
+    with ra3:
+        rec_duration = st.number_input("Duration (s)", min_value=0.05, max_value=10.0, value=1.0, step=0.5,
+                                       key="rec_duration",
+                                       help="Slice analyzed. 1 s is plenty. Time depends only on this, not on the file size: about 15 s per second of signal, plus ~15 s for decoding (always limited to the first ~40 CADUs).")
+    with ra4:
+        rec_rs_nominal = st.number_input("Nominal symbol rate (S/s)", min_value=1.0,
+                                         value=float(symbol_rate), step=1_000.0, format="%.0f",
+                                         key="rec_rs_nominal")
+    rb1, rb2, rb3 = st.columns([1, 1, 2])
+    with rb1:
+        rec_dtype = st.selectbox("Sample format", ["int16", "float32"], key="rec_dtype")
+    with rb2:
+        rec_alpha = st.number_input("Matched filter roll-off", min_value=0.05, max_value=1.0, value=0.35,
+                                    step=0.05, key="rec_alpha")
+    with rb3:
+        rec_decode = st.checkbox("Decode frames (slower)", value=True, key="rec_decode")
+
+    if st.button("Analyze recording", width="stretch"):
+        if not rec_path:
+            st.error("Enter the path of the recording file first.")
+        elif not os.path.isfile(rec_path):
+            st.error(f"File not found: {rec_path}")
+        else:
+            bar = st.progress(0.0, text="Starting...")
+            try:
+                result_rec = analyze(
+                    rec_path, rec_fs, rec_offset, rec_duration, rec_dtype, 0, rec_rs_nominal, rec_alpha,
+                    do_decode=rec_decode, progress=lambda frac, msg: bar.progress(min(frac, 1.0), text=msg),
+                )
+                result_rec["path"] = rec_path
+                st.session_state["recording_analysis"] = result_rec
+            except Exception as exc:  # surface analysis errors in the UI instead of crashing
+                st.error(f"Analysis failed: {exc}")
+            bar.empty()
+
+    rec = st.session_state.get("recording_analysis")
+    if rec is not None:
+        frames = rec.get("frames") or {}
+        st.markdown(f"**{os.path.basename(rec['path'])}** -- {rec['file']}")
+        summary = [
+            ("Symbol rate", f"{rec['rs']:,.1f} S/s".replace(",", " "), f"{rec['rs_ppm']:+.1f} ppm vs nominal"),
+            ("Carrier offset", f"{rec['fc'] / 1e3:+.3f} kHz", f"drift {rec['fdot']:+.1f} Hz/s"),
+            ("Es/N0", f"{rec['esn0_evm_db']:.1f} dB", f"EVM {rec['evm_pct']:.1f}%"),
+            ("Spectral lines", f"{rec['n_lines']}", "random-like" if rec["n_lines"] < 20 else "periodic content"),
+        ]
+        if "randomizer" in frames:
+            summary += [
+                ("Randomizer", frames["randomizer"], f"{frames['cadu_bytes']}-byte CADUs"),
+                ("Idle frames", f"{frames['idle_frames_pct']:.0f}%", f"SCID {frames['scid']}"),
+            ]
+        st.markdown('<div class="secondary-strip">' + "".join(
+            f'<div class="sec-item" title="{sub}"><span class="label">{label}</span>'
+            f'<span class="value">{value}</span></div>'
+            for label, value, sub in summary) + "</div>", unsafe_allow_html=True)
+        st.write("")
+
+        pc1, pc2, pc3 = st.columns([1.6, 1, 1.4])
+        with pc1:
+            # Max-hold decimation keeps the discrete lines visible at a plottable size.
+            k = max(1, len(rec["psd_db"]) // 8192)
+            n = len(rec["psd_db"]) // k * k
+            fig_rec = go.Figure(go.Scatter(
+                x=rec["psd_freqs"][:n].reshape(-1, k).mean(1) / 1e6, y=rec["psd_db"][:n].reshape(-1, k).max(1),
+                mode="lines", line=dict(color="#00d4ff", width=1)))
+            fig_rec.update_layout(title="Spectrum", xaxis_title="Frequency (MHz)", yaxis_title="dB rel. peak",
+                                  height=320, xaxis=_GRID, yaxis=_GRID, **_PLOT_LAYOUT)
+            st.plotly_chart(fig_rec, width="stretch")
+        with pc2:
+            pts = rec["constellation"][:5000]
+            fig_rc = go.Figure(go.Scattergl(x=pts.real, y=pts.imag, mode="markers",
+                                            marker=dict(size=3, color="#00d4ff", opacity=0.35)))
+            fig_rc.update_layout(title="Constellation", height=320, xaxis=dict(range=[-1.3, 1.3], **_GRID),
+                                 yaxis=dict(range=[-1.3, 1.3], scaleanchor="x", **_GRID), **_PLOT_LAYOUT)
+            st.plotly_chart(fig_rc, width="stretch")
+        with pc3:
+            step_ph = max(1, len(rec["phase_t"]) // 5000)
+            fig_ph = go.Figure(go.Scatter(x=rec["phase_t"][::step_ph] * 1e3, y=rec["phase_resid_deg"][::step_ph],
+                                          mode="lines", line=dict(color="#00d4ff", width=1)))
+            fig_ph.update_layout(title="Carrier phase residual", xaxis_title="Time (ms)", yaxis_title="deg",
+                                 height=320, xaxis=_GRID, yaxis=_GRID, **_PLOT_LAYOUT)
+            st.plotly_chart(fig_ph, width="stretch")
+
+        with st.expander("Full report"):
+            st.code("\n".join(report_lines(rec)), language=None)
+
+        st.markdown("**Reproduce it in the generator**")
+        ac1, ac2, ac3, ac4 = st.columns(4)
+        with ac1:
+            st.checkbox(f"Symbol rate ({int(round(rec['rs'] / 50) * 50):,} S/s)".replace(",", " "),
+                                   value=True, key="apply_rs")
+        with ac2:
+            st.checkbox(f"Modulation ({rec['modulation']})", value=True, key="apply_mod")
+        with ac3:
+            st.checkbox(f"Randomizer ({frames.get('randomizer', 'not decoded')})",
+                                     value="randomizer" in frames, disabled="randomizer" not in frames,
+                                     key="apply_rand")
+        with ac4:
+            st.checkbox(f"Carrier offset ({rec['fc']:+.0f} Hz)", value=False, key="apply_fc")
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            st.button("Apply to generator", width="stretch", on_click=_apply_analysis_to_generator)
+        with bc2:
+            if "records" in frames:
+                st.download_button(
+                    f"Download the {frames['n_cadu']} decoded frames (ASM + Transfer Frame)",
+                    data=frames["records"], width="stretch",
+                    file_name=os.path.splitext(os.path.basename(rec["path"]))[0] + "_frames.bin",
+                    help="Load this under Payload as an 'ASM + Transfer Frame (not scrambled)' file to "
+                         "regenerate the recorded content bit for bit.",
+                )
 
 panel = st.container(border=True)
 with panel:
