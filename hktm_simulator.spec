@@ -11,8 +11,12 @@
 
 from PyInstaller.utils.hooks import collect_all
 
+# app.py is run by Streamlit as a script, not imported, so PyInstaller never
+# traces its imports: every local module it imports must be listed here too
+# (analyze_recording.py backs the GUI's "Analyze a real recording" panel).
 datas = [
     ("app.py", "."),
+    ("analyze_recording.py", "."),
     ("ccsds_chain", "ccsds_chain"),
     (".streamlit", ".streamlit"),
 ]
