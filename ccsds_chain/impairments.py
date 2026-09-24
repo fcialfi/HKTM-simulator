@@ -24,6 +24,14 @@ signal away from 0 Hz; applied first, to a signal still symmetric about
 folds invisibly back onto the same band. Frequency offset and phase noise
 commute with each other (both are pure phase rotations), so their relative
 order doesn't matter.
+
+A fourth effect, apply_doppler(), is not a transmitter impairment at all
+but a channel/propagation one: the Doppler shift (and its rate of change)
+from relative motion between spacecraft and ground station during a real
+pass. It is applied last, after every impairment above (see
+pipeline._apply_impairments()) -- physically, Doppler is imparted by the
+signal's path from the antenna onward, after every transmitter-side
+non-ideality has already acted on it.
 """
 
 import numpy as np
@@ -64,6 +72,32 @@ def apply_frequency_offset(iq: np.ndarray, freq_offset_hz: float, sample_rate: f
         return iq
     n = start_sample + np.arange(len(iq))
     phase = 2 * np.pi * freq_offset_hz * n / sample_rate
+    return iq * np.exp(1j * phase)
+
+
+def apply_doppler(iq: np.ndarray, doppler_hz: float, doppler_rate_hz_s: float,
+                   sample_rate: float, start_sample: int = 0) -> np.ndarray:
+    """Models the channel's own Doppler shift and Doppler rate -- from
+    relative motion between spacecraft and ground station during a real
+    pass -- as a local-linear approximation valid over the export's
+    duration: `doppler_hz` is the instantaneous shift at the start of the
+    whole exported signal (absolute sample 0), `doppler_rate_hz_s` its
+    constant rate of change (Hz/s, positive or negative). Unlike
+    apply_frequency_offset() (a constant residual transmitter LO error),
+    this is a chirp -- a quadratic phase ramp:
+
+        phase(t) = 2*pi*(doppler_hz*t + 0.5*doppler_rate_hz_s*t^2)
+
+    computed directly from each sample's absolute position (`start_sample`
+    + its index within `iq`) rather than accumulated incrementally, so it
+    is exact and reproducible regardless of how the signal is chunked
+    across export_chain()'s batches -- the same contract as
+    apply_frequency_offset()."""
+    if doppler_hz == 0 and doppler_rate_hz_s == 0:
+        return iq
+    n = start_sample + np.arange(len(iq))
+    t = n / sample_rate
+    phase = 2 * np.pi * (doppler_hz * t + 0.5 * doppler_rate_hz_s * t ** 2)
     return iq * np.exp(1j * phase)
 
 
