@@ -79,3 +79,28 @@ def test_unwraps_rfcatcher_tar(tmp_path):
     x, desc = ar.load_iq(str(archive), fs=10.0, offset_s=0.0, duration_s=2.0)
     assert "AWS_test.iq" in desc
     assert np.array_equal(x, np.arange(0, 40, 2) + 1j * np.arange(1, 40, 2))
+
+
+def test_unwraps_pax_tar_and_reads_without_memory_map(tmp_path):
+    """Very large members make tar writers emit a pax extended header
+    before the real one; the IQ data must still be found. (A long member
+    name forces the same pax header here without writing >8 GB.)"""
+    import tarfile
+    iq = (np.arange(400, dtype="<i2")).tobytes()
+    long_name = "AWS_" + "x" * 120 + ".iq"
+    src = tmp_path / "src.iq"
+    src.write_bytes(iq)
+    archive = tmp_path / "AWS_pax.rfcatcher"
+    with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT) as t:
+        t.add(src, arcname=long_name)
+    x, desc = ar.load_iq(str(archive), fs=100.0, offset_s=0.5, duration_s=0.3)
+    assert long_name in desc
+    assert np.array_equal(x, np.arange(100, 160, 2) + 1j * np.arange(101, 160, 2))
+
+
+def test_start_past_end_is_a_clear_error(tmp_path):
+    import pytest
+    path = tmp_path / "raw.iq"
+    path.write_bytes(np.zeros(200, dtype="<i2").tobytes())
+    with pytest.raises(ValueError, match="past the end"):
+        ar.load_iq(str(path), fs=100.0, offset_s=5.0, duration_s=1.0)

@@ -25,6 +25,7 @@ Example (the AWS_2 pass):
 import argparse
 import os
 import sys
+import tarfile
 from fractions import Fraction
 from typing import Callable, Optional
 
@@ -47,35 +48,43 @@ ASM_BITS = bytes_to_bits(ASM).astype(np.int8)
 
 def locate_iq(path: str, header_bytes: int = 0) -> tuple[int, int, str]:
     """(data offset, data length in bytes, description) of the IQ samples
-    in `path`. An RF-Catcher .rfcatcher file is a POSIX tar archive whose
-    first member is the raw IQ file; anything else is taken as raw IQ after
+    in `path`. An RF-Catcher .rfcatcher file is a tar archive whose first
+    member is the raw IQ file (tarfile handles the pax/GNU extensions used
+    for very large members); anything else is taken as raw IQ after
     `header_bytes`."""
     file_size = os.path.getsize(path)
     with open(path, "rb") as f:
         head = f.read(512)
     if len(head) == 512 and head[257:262] == b"ustar":
-        name = head[:100].split(b"\0")[0].decode(errors="replace")
-        size = int(head[124:136].split(b"\0")[0].strip() or b"0", 8)
-        available = min(size, file_size - 512)
-        desc = f"tar archive, member '{name}' ({size / 1e9:.2f} GB"
-        desc += ")" if available == size else f", only {available / 1e6:.1f} MB present in this file)"
-        return 512, available, desc
+        with open(path, "rb") as f:
+            member = tarfile.open(fileobj=f, mode="r:").next()
+        if member is not None and member.isfile():
+            available = min(member.size, file_size - member.offset_data)
+            desc = f"tar archive, member '{member.name}' ({member.size / 1e9:.2f} GB"
+            desc += ")" if available == member.size else f", only {available / 1e6:.1f} MB present in this file)"
+            return member.offset_data, available, desc
     return header_bytes, file_size - header_bytes, "raw IQ"
 
 
 def load_iq(path: str, fs: float, offset_s: float, duration_s: float,
             dtype: str = "int16", header_bytes: int = 0) -> tuple[np.ndarray, str]:
-    """Complex IQ slice [offset_s, offset_s + duration_s) of the recording,
-    read through a memory map so multi-GB files are fine."""
+    """Complex IQ slice [offset_s, offset_s + duration_s) of the recording.
+    Seeks straight to the slice and reads only those bytes, so multi-GB
+    files are fine. (Plain reads rather than a memory map: on Windows,
+    mapping a OneDrive-synced file fails with "[Errno 22] Invalid argument".)"""
     data_offset, data_bytes, desc = locate_iq(path, header_bytes)
     np_dtype = np.dtype("<i2") if dtype == "int16" else np.dtype("<f4")
-    n_total = data_bytes // (2 * np_dtype.itemsize)
+    sample_bytes = 2 * np_dtype.itemsize
+    n_total = data_bytes // sample_bytes
     start = int(offset_s * fs)
     stop = min(n_total, start + int(duration_s * fs))
     if start >= n_total:
-        raise SystemExit(f"--offset {offset_s} s is past the end of the data ({n_total / fs:.2f} s)")
-    raw = np.memmap(path, dtype=np_dtype, mode="r", offset=data_offset, shape=(2 * n_total,))
-    seg = np.asarray(raw[2 * start:2 * stop], dtype=np.float32)
+        raise ValueError(f"start {offset_s} s is past the end of the data ({n_total / fs:.2f} s)")
+    with open(path, "rb") as f:
+        f.seek(data_offset + start * sample_bytes)
+        buf = f.read((stop - start) * sample_bytes)
+    seg = np.frombuffer(buf[:len(buf) // sample_bytes * sample_bytes], dtype=np_dtype).astype(np.float32)
+    stop = start + len(seg) // 2
     desc += f"; {n_total / fs:.2f} s of IQ at {fs / 1e6:g} Msps, analyzing {start / fs:.2f}-{stop / fs:.2f} s"
     return (seg[0::2] + 1j * seg[1::2]).astype(np.complex64), desc
 
@@ -502,9 +511,12 @@ def main():
                          "(the generator's 'asm_frame' input format)")
     args = ap.parse_args()
 
-    r = analyze(args.recording, args.fs, args.offset, args.duration, args.dtype, args.header_bytes,
-                args.rs_nominal, args.alpha, args.max_carrier_offset, args.modulation,
-                not args.no_decode, args.decode_symbols)
+    try:
+        r = analyze(args.recording, args.fs, args.offset, args.duration, args.dtype, args.header_bytes,
+                    args.rs_nominal, args.alpha, args.max_carrier_offset, args.modulation,
+                    not args.no_decode, args.decode_symbols)
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}")
     print("\n".join(report_lines(r)))
     if args.save_frames and r["frames"] and "records" in r["frames"]:
         with open(args.save_frames, "wb") as fh:
