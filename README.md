@@ -371,7 +371,10 @@ to the recorder's rate stays exact), modulation, randomizer and optionally
 the carrier offset into the sidebar, and the decoded frames can be
 downloaded to regenerate the recorded content bit for bit. Only `--duration` seconds from `--offset` are read
 (memory-mapped), so multi-GB recordings are fine; decoding is pure Python
-and takes roughly 20-30 s per million symbols (`--no-decode` to skip it).
+and is limited by default to the first 400 000 symbols (~40 CADUs, ~15 s;
+`--decode-symbols` to change it, `--no-decode` to skip it). Run time
+depends on the slice length, never on the file size: about 30 s in total
+for a 1 s slice.
 
 ### Tests
 

@@ -388,7 +388,7 @@ def plot_report(path: str, r: dict, title: str):
 def analyze(path: str, fs: float, offset_s: float = 0.0, duration_s: float = 1.0,
             dtype: str = "int16", header_bytes: int = 0, rs_nominal: float = 1.785e6,
             alpha: float = 0.35, max_carrier_offset: float = 200e3, modulation: str = "auto",
-            do_decode: bool = True, decode_symbols: int = 1_200_000,
+            do_decode: bool = True, decode_symbols: int = 400_000,
             progress: Optional[Callable[[float, str], None]] = None) -> dict:
     """Run every step on a slice of the recording; returns the measurements
     plus light-weight arrays for plotting (shared by the CLI and the GUI)."""
@@ -493,8 +493,8 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.35, help="RRC roll-off of the matched filter")
     ap.add_argument("--max-carrier-offset", type=float, default=200e3, help="carrier search range, +-Hz")
     ap.add_argument("--modulation", choices=["auto", "QPSK", "BPSK"], default="auto")
-    ap.add_argument("--decode-symbols", type=int, default=1_200_000,
-                    help="max symbols to Viterbi-decode (roughly 20-30 s per million)")
+    ap.add_argument("--decode-symbols", type=int, default=400_000,
+                    help="max symbols to Viterbi-decode (default ~40 CADUs, ~15 s; roughly 20-30 s per million)")
     ap.add_argument("--no-decode", action="store_true")
     ap.add_argument("--plot", type=str, default=None, help="save a spectrum/constellation/phase PNG here")
     ap.add_argument("--save-frames", type=str, default=None,

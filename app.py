@@ -792,7 +792,7 @@ with st.expander("Analyze a real recording", expanded="recording_analysis" in st
     with ra3:
         rec_duration = st.number_input("Duration (s)", min_value=0.05, max_value=10.0, value=1.0, step=0.5,
                                        key="rec_duration",
-                                       help="Slice analyzed. 1 s is plenty; decoding takes roughly 30-60 s per second of signal.")
+                                       help="Slice analyzed. 1 s is plenty. Time depends only on this, not on the file size: about 15 s per second of signal, plus ~15 s for decoding (always limited to the first ~40 CADUs).")
     with ra4:
         rec_rs_nominal = st.number_input("Nominal symbol rate (S/s)", min_value=1.0,
                                          value=float(symbol_rate), step=1_000.0, format="%.0f",
