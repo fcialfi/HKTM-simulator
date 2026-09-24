@@ -26,9 +26,10 @@ import argparse
 import os
 import sys
 from fractions import Fraction
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
+import scipy.fft as sfft
 import scipy.signal as ss
 
 from ccsds_chain.pulse_shaping import rrc_taps
@@ -86,8 +87,8 @@ def load_iq(path: str, fs: float, offset_s: float, duration_s: float,
 def _peak_freq(z: np.ndarray, fs: float, lo: float, hi: float, pad: int = 2) -> tuple[float, float]:
     """Frequency of the strongest FFT line of `z` within [lo, hi] (parabolic
     interpolation between bins), and its height over the band median in dB."""
-    n_fft = len(z) * pad
-    spec = np.abs(np.fft.fft(z, n_fft))
+    n_fft = sfft.next_fast_len(len(z) * pad)
+    spec = np.abs(sfft.fft(z, n_fft))
     freqs = np.fft.fftfreq(n_fft, 1 / fs)
     band = np.where((freqs >= lo) & (freqs <= hi))[0]
     k = band[np.argmax(spec[band])]
@@ -162,12 +163,15 @@ def demodulate(x: np.ndarray, fs: float, rs: float, fc: float, fdot: float, alph
     sps_eff = fs * r.numerator / r.denominator / rs
     y = ss.fftconvolve(y, rrc_taps(alpha, 16, sps), mode="same")
 
-    grid = np.arange(len(y))
     n_sym = int((len(y) - 2 * sps_eff) / sps_eff)
     out = np.empty(n_sym, dtype=np.complex64)
 
     def sample(idx):
-        return np.interp(idx, grid, y.real) + 1j * np.interp(idx, grid, y.imag)
+        # Linear interpolation, done directly: np.interp on y.real/y.imag
+        # would copy the whole (non-contiguous) signal on every call.
+        i0 = np.clip(np.floor(idx).astype(np.int64), 0, len(y) - 2)
+        frac = idx - i0
+        return y[i0] * (1 - frac) + y[i0 + 1] * frac
 
     t0 = None
     for b in range(0, n_sym, block):
@@ -327,6 +331,9 @@ def analyze_frames(bits: np.ndarray) -> dict:
         "dominant_data_byte": (int(fill_vals[fill_counts.argmax()]), 100 * fill_counts.max() / frames[:, 6:].size),
         "bytes_changed_between_cadus": float(np.median(changed)) if len(changed) else None,
         "cadu_bits": cadu_bits,
+        # ASM + de-randomized frame per CADU: the "asm_frame" input format,
+        # ready to feed back into the generator.
+        "records": b"".join(ASM + row.tobytes() for row in frames),
     }
 
 
@@ -343,7 +350,7 @@ def periodicity(d: np.ndarray, lag: int, modulation: str) -> float:
 # Report
 # --------------------------------------------------------------------------
 
-def plot_report(path, f, pdb, d, ph, rs, title):
+def plot_report(path: str, r: dict, title: str):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -359,16 +366,14 @@ def plot_report(path, f, pdb, d, ph, rs, title):
         for side in ("left", "bottom"):
             ax.spines[side].set_color(grid)
 
-    axes[0].plot(f / 1e6, pdb - pdb.max(), color=series, linewidth=1)
+    axes[0].plot(r["psd_freqs"] / 1e6, r["psd_db"], color=series, linewidth=1)
     axes[0].set(xlabel="Frequency (MHz)", ylabel="PSD (dB rel. peak)", title="Spectrum")
 
-    pts = d[:: max(1, len(d) // 20000)]
+    pts = r["constellation"]
     axes[1].plot(pts.real, pts.imag, ".", color=series, markersize=1.5, alpha=0.35)
     axes[1].set(xlabel="I", ylabel="Q", title="Constellation (after carrier recovery)", aspect="equal")
 
-    t_ms = np.arange(len(ph)) * 128 / rs * 1e3
-    resid = ph - np.polyval(np.polyfit(t_ms, ph, 2), t_ms)
-    axes[2].plot(t_ms, np.degrees(resid), color=series, linewidth=0.8)
+    axes[2].plot(r["phase_t"] * 1e3, r["phase_resid_deg"], color=series, linewidth=0.8)
     axes[2].set(xlabel="Time (ms)", ylabel="Residual phase (deg)", title="Carrier phase residual")
 
     for ax in axes:
@@ -378,6 +383,102 @@ def plot_report(path, f, pdb, d, ph, rs, title):
     fig.suptitle(title, color=ink)
     fig.tight_layout()
     fig.savefig(path, dpi=130)
+
+
+def analyze(path: str, fs: float, offset_s: float = 0.0, duration_s: float = 1.0,
+            dtype: str = "int16", header_bytes: int = 0, rs_nominal: float = 1.785e6,
+            alpha: float = 0.35, max_carrier_offset: float = 200e3, modulation: str = "auto",
+            do_decode: bool = True, decode_symbols: int = 1_200_000,
+            progress: Optional[Callable[[float, str], None]] = None) -> dict:
+    """Run every step on a slice of the recording; returns the measurements
+    plus light-weight arrays for plotting (shared by the CLI and the GUI)."""
+    def step(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
+    step(0.0, "Reading the recording...")
+    x, desc = load_iq(path, fs, offset_s, duration_s, dtype, header_bytes)
+    rms = float(np.sqrt(np.mean(np.abs(x) ** 2)))
+    full_scale = 2048 if dtype == "int16" else 1.0
+    r = {"file": desc, "dtype": dtype, "rms": rms, "peak": float(np.abs(x).max()),
+         "dbfs": 20 * np.log10(max(rms, 1e-12) / full_scale), "rs_nominal": rs_nominal}
+
+    step(0.05, "Estimating symbol rate and carrier...")
+    r["modulation_auto"] = modulation == "auto"
+    r["modulation"] = detect_modulation(x, fs, max_carrier_offset) if modulation == "auto" else modulation
+    power = 4 if r["modulation"] == "QPSK" else 2
+    r["rs"] = estimate_symbol_rate(x, fs, rs_nominal)
+    r["rs_ppm"] = (r["rs"] / rs_nominal - 1) * 1e6
+    r["fc"], r["fdot"], _ = estimate_carrier(x, fs, max_carrier_offset, power)
+
+    step(0.15, "Computing the spectrum...")
+    f, pdb, r["n_lines"] = count_spectral_lines(x, fs, r["fc"], r["rs"], alpha)
+    r["psd_freqs"], r["psd_db"] = f, pdb - pdb.max()
+
+    step(0.25, "Demodulating...")
+    d, ph = remove_carrier_phase(demodulate(x, fs, r["rs"], r["fc"], r["fdot"], alpha), power)
+    del x
+    r["n_symbols"] = len(d)
+    r.update(symbol_metrics(d, r["modulation"]))
+    r["phase_noise"] = phase_noise_bands(ph, r["rs"])
+    r["constellation"] = d[:: max(1, len(d) // 20000)]
+    t = np.arange(len(ph)) * 128 / r["rs"]
+    r["phase_t"], r["phase_resid_deg"] = t, np.degrees(ph - np.polyval(np.polyfit(t, ph, 2), t))
+
+    r["decoding"], r["frames"] = None, None
+    if do_decode:
+        step(0.4, "Viterbi decoding (roughly 20-30 s per million symbols)...")
+        bits, r["decoding"] = decode(d, r["modulation"], decode_symbols)
+        if bits is not None:
+            step(0.95, "Analyzing frames...")
+            fr = analyze_frames(bits)
+            if "error" not in fr:
+                sym_per_cadu = fr["cadu_bits"] * (2 if "conv" in r["decoding"] else 1) // (
+                    2 if r["modulation"] == "QPSK" else 1)
+                fr["sym_per_cadu"] = sym_per_cadu
+                fr["periodicity"] = periodicity(d, sym_per_cadu, r["modulation"])
+            r["frames"] = fr
+    step(1.0, "Done")
+    return r
+
+
+def report_lines(r: dict) -> list:
+    """Human-readable report of an `analyze()` result."""
+    lines = [f"[1] File: {r['file']}",
+             f"    Level: rms {r['rms']:.1f}, peak {r['peak']:.1f} ({r['dbfs']:.1f} dBFS rms"
+             f"{' vs 12-bit full scale' if r['dtype'] == 'int16' else ''})",
+             f"[2] Symbol rate: {r['rs']:,.1f} sps  ({r['rs'] - r['rs_nominal']:+,.1f} Hz, {r['rs_ppm']:+.1f} ppm "
+             f"vs nominal {r['rs_nominal']:,.0f})".replace(",", " "),
+             f"[3] Modulation: {r['modulation']}{' (auto-detected)' if r['modulation_auto'] else ''}; "
+             f"carrier offset {r['fc'] / 1e3:+.3f} kHz, drift {r['fdot']:+.1f} Hz/s over the slice",
+             f"[4] Spectrum: {r['n_lines']} discrete lines >6 dB above the local spectrum inside the occupied "
+             f"band ({'random-like data' if r['n_lines'] < 20 else 'strongly periodic content'})",
+             f"[5] Demodulated {r['n_symbols']:,} symbols".replace(",", " "),
+             f"    Es/N0: {r['esn0_evm_db']:.1f} dB (EVM {r['evm_pct']:.1f}%), blind M2M4 {r['esn0_m2m4_db']:.1f} dB"]
+    if r["modulation"] == "QPSK":
+        lines.append(f"    IQ imbalance: gain {r['iq_gain_db']:+.2f} dB, quadrature skew {r['iq_skew_deg']:+.2f} deg")
+    lines.append("    Residual phase rms: " + ", ".join(f"{k}: {v:.2f} deg" for k, v in r["phase_noise"].items()))
+    if r["decoding"] is not None:
+        lines.append(f"[6] Decoding: {r['decoding']}")
+        fr = r["frames"]
+        if fr is not None and "error" in fr:
+            lines.append(f"    {fr['error']}")
+        elif fr is not None:
+            byte, share = fr["dominant_data_byte"]
+            lines += [
+                f"    {fr['n_cadu']} CADUs of {fr['cadu_bytes']} bytes (ASM every {fr['cadu_bits']} bits"
+                f"{'' if fr['asm_spacing_consistent'] else ', with gaps'})",
+                f"    Pseudo-randomizer: {fr['randomizer']} "
+                f"(header check passes on {100 * fr['randomizer_confidence']:.0f}% of frames)",
+                f"    TM header: SCID {fr['scid']}, frames per VCID {fr['vcid_counts']}, "
+                f"idle frames (FHP=0x7FE) {fr['idle_frames_pct']:.0f}%",
+                f"    Data field: most common byte 0x{byte:02X} ({share:.0f}% of it); median "
+                f"{fr['bytes_changed_between_cadus']:.0f} of {fr['cadu_bytes'] - 4} bytes change from one "
+                "CADU to the next on air",
+                f"    Symbol correlation one CADU apart ({fr['sym_per_cadu']} symbols): {fr['periodicity']:.2f} "
+                f"({'nearly periodic signal' if fr['periodicity'] > 0.5 else 'random-like'})",
+            ]
+    return lines
 
 
 def main():
@@ -393,69 +494,24 @@ def main():
     ap.add_argument("--max-carrier-offset", type=float, default=200e3, help="carrier search range, +-Hz")
     ap.add_argument("--modulation", choices=["auto", "QPSK", "BPSK"], default="auto")
     ap.add_argument("--decode-symbols", type=int, default=1_200_000,
-                    help="max symbols to Viterbi-decode (pure Python: ~1 min per million)")
+                    help="max symbols to Viterbi-decode (roughly 20-30 s per million)")
     ap.add_argument("--no-decode", action="store_true")
     ap.add_argument("--plot", type=str, default=None, help="save a spectrum/constellation/phase PNG here")
+    ap.add_argument("--save-frames", type=str, default=None,
+                    help="write the decoded frames here as ASM + de-randomized Transfer Frame records "
+                         "(the generator's 'asm_frame' input format)")
     args = ap.parse_args()
 
-    x, desc = load_iq(args.recording, args.fs, args.offset, args.duration, args.dtype, args.header_bytes)
-    print(f"[1] File: {desc}")
-    rms = np.sqrt(np.mean(np.abs(x) ** 2))
-    full_scale = 2048 if args.dtype == "int16" else 1.0
-    print(f"    Level: rms {rms:.1f}, peak {np.abs(x).max():.1f} "
-          f"({20 * np.log10(rms / full_scale):.1f} dBFS rms{' vs 12-bit full scale' if args.dtype == 'int16' else ''})")
-
-    modulation = detect_modulation(x, args.fs, args.max_carrier_offset) if args.modulation == "auto" else args.modulation
-    power = 4 if modulation == "QPSK" else 2
-
-    rs = estimate_symbol_rate(x, args.fs, args.rs_nominal)
-    ppm = (rs / args.rs_nominal - 1) * 1e6
-    print(f"[2] Symbol rate: {rs:,.1f} sps  ({rs - args.rs_nominal:+,.1f} Hz, {ppm:+.1f} ppm vs nominal "
-          f"{args.rs_nominal:,.0f})".replace(",", " "))
-
-    fc, fdot, fs_track = estimate_carrier(x, args.fs, args.max_carrier_offset, power)
-    print(f"[3] Modulation: {modulation}{' (auto-detected)' if args.modulation == 'auto' else ''}; "
-          f"carrier offset {fc / 1e3:+.3f} kHz, drift {fdot:+.1f} Hz/s over the slice")
-
-    f, pdb, n_lines = count_spectral_lines(x, args.fs, fc, rs, args.alpha)
-    print(f"[4] Spectrum: {n_lines} discrete lines >6 dB above the local spectrum inside the occupied band "
-          f"({'random-like data' if n_lines < 20 else 'strongly periodic content'})")
-
-    s = demodulate(x, args.fs, rs, fc, fdot, args.alpha)
-    d, ph = remove_carrier_phase(s, power)
-    m = symbol_metrics(d, modulation)
-    print(f"[5] Demodulated {len(d):,} symbols".replace(",", " "))
-    print(f"    Es/N0: {m['esn0_evm_db']:.1f} dB (EVM {m['evm_pct']:.1f}%), blind M2M4 {m['esn0_m2m4_db']:.1f} dB")
-    if modulation == "QPSK":
-        print(f"    IQ imbalance: gain {m['iq_gain_db']:+.2f} dB, quadrature skew {m['iq_skew_deg']:+.2f} deg")
-    bands = phase_noise_bands(ph, rs)
-    print("    Residual phase rms: " + ", ".join(f"{k}: {v:.2f} deg" for k, v in bands.items()))
-
-    if not args.no_decode:
-        bits, how = decode(d, modulation, args.decode_symbols)
-        print(f"[6] Decoding: {how}")
-        if bits is not None:
-            fr = analyze_frames(bits)
-            if "error" in fr:
-                print(f"    {fr['error']}")
-            else:
-                sym_per_cadu = fr["cadu_bits"] * (2 if "conv" in how else 1) // (2 if modulation == "QPSK" else 1)
-                rep = periodicity(d, sym_per_cadu, modulation)
-                byte, share = fr["dominant_data_byte"]
-                print(f"    {fr['n_cadu']} CADUs of {fr['cadu_bytes']} bytes (ASM every {fr['cadu_bits']} bits"
-                      f"{'' if fr['asm_spacing_consistent'] else ', with gaps'})")
-                print(f"    Pseudo-randomizer: {fr['randomizer']} "
-                      f"(header check passes on {100 * fr['randomizer_confidence']:.0f}% of frames)")
-                print(f"    TM header: SCID {fr['scid']}, frames per VCID {fr['vcid_counts']}, "
-                      f"idle frames (FHP=0x7FE) {fr['idle_frames_pct']:.0f}%")
-                print(f"    Data field: most common byte 0x{byte:02X} ({share:.0f}% of it); "
-                      f"median {fr['bytes_changed_between_cadus']:.0f} of {fr['cadu_bytes'] - 4} bytes change "
-                      f"from one CADU to the next on air")
-                print(f"    Symbol correlation one CADU apart ({sym_per_cadu} symbols): {rep:.2f} "
-                      f"({'nearly periodic signal' if rep > 0.5 else 'random-like'})")
-
+    r = analyze(args.recording, args.fs, args.offset, args.duration, args.dtype, args.header_bytes,
+                args.rs_nominal, args.alpha, args.max_carrier_offset, args.modulation,
+                not args.no_decode, args.decode_symbols)
+    print("\n".join(report_lines(r)))
+    if args.save_frames and r["frames"] and "records" in r["frames"]:
+        with open(args.save_frames, "wb") as fh:
+            fh.write(r["frames"]["records"])
+        print(f"Decoded frames saved to {args.save_frames}")
     if args.plot:
-        plot_report(args.plot, f, pdb, d, ph, rs, os.path.basename(args.recording))
+        plot_report(args.plot, r, os.path.basename(args.recording))
         print(f"Plot saved to {args.plot}")
 
 

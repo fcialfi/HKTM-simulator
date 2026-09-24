@@ -44,6 +44,28 @@ def test_recovers_signal_parameters_and_frame_content():
     assert frames["scid"] == [104] and set(frames["vcid_counts"]) == {7}
     assert frames["dominant_data_byte"][0] == 0x5A
     assert ar.periodicity(d, frames["cadu_bits"], "QPSK") > 0.5
+    # The de-randomized records are exactly what was fed in, ready to be
+    # loaded back into the generator as "asm_frame" input.
+    sent = _idle_frames(n_cadu)
+    got = frames["records"]
+    assert len(got) == frames["n_cadu"] * 1279 and frames["n_cadu"] >= n_cadu - 2
+    assert got in sent
+
+
+def test_analyze_end_to_end_on_a_file(tmp_path):
+    p = ChainParams(input_format="asm_frame", randomizer="short", payload_bytes=_idle_frames(6),
+                    n_cadu=6, sps=4)
+    iq = run_chain(p).iq
+    raw = np.empty(2 * len(iq), dtype="<i2")
+    raw[0::2], raw[1::2] = np.round(iq.real * 1500), np.round(iq.imag * 1500)
+    path = tmp_path / "rec.iq"
+    path.write_bytes(raw.tobytes())
+    steps = []
+    r = ar.analyze(str(path), fs=p.symbol_rate * p.sps, duration_s=1.0,
+                   progress=lambda frac, msg: steps.append(frac))
+    assert steps[0] == 0.0 and steps[-1] == 1.0
+    assert r["frames"]["randomizer"] == "short"
+    assert any("Pseudo-randomizer: short" in line for line in ar.report_lines(r))
 
 
 def test_unwraps_rfcatcher_tar(tmp_path):

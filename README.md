@@ -359,9 +359,19 @@ the symbols to find the CADU length, the pseudo-randomizer in use
 (none/short/long, checked against the TM primary header), SCID/VCIDs, the
 share of idle frames, and how repetitive the on-air content is. The PNG
 shows the spectrum, the constellation after carrier recovery and the
-residual carrier phase. Only `--duration` seconds from `--offset` are read
+residual carrier phase; `--save-frames` writes the decoded frames as ASM +
+de-randomized Transfer Frame records, loadable as `asm_frame` input.
+
+The same analysis is in the GUI, in the "Analyze a real recording" panel
+above the live preview: enter the file's local path (it is read from disk,
+not uploaded through the browser, so multi-GB files are fine), pick the
+slice, and click "Analyze recording". From the results, "Apply to
+generator" copies the measured symbol rate (rounded to 50 Hz so resampling
+to the recorder's rate stays exact), modulation, randomizer and optionally
+the carrier offset into the sidebar, and the decoded frames can be
+downloaded to regenerate the recorded content bit for bit. Only `--duration` seconds from `--offset` are read
 (memory-mapped), so multi-GB recordings are fine; decoding is pure Python
-and takes about a minute per million symbols (`--no-decode` to skip it).
+and takes roughly 20-30 s per million symbols (`--no-decode` to skip it).
 
 ### Tests
 
