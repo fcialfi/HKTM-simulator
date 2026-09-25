@@ -29,6 +29,7 @@ import datetime
 import json
 import os
 
+from ccsds_chain import rfcatcher
 from ccsds_chain.mapping import BITS_PER_SYMBOL
 from ccsds_chain.pipeline import ASM_FRAMED_INPUT_FORMATS, INPUT_FORMATS, ChainParams, export_chain
 from ccsds_chain.utils import resample_ratio
@@ -189,6 +190,16 @@ def build_cli():
     p.add_argument("--target-fs", type=float, default=TARGET_FS,
                     help="resample the output to this exact sample rate in Hz (e.g. 10e6); "
                          "default: no resampling, native symbol_rate*sps")
+    p.add_argument("--rfcatcher", action="store_true",
+                   help="write an RF-Catcher recording (.rfcatcher: int16 IQ + JSON metadata with sample "
+                        "rate, RF frequency and bandwidth) instead of a raw IQ file; implies --dtype int16")
+    p.add_argument("--rf-frequency-mhz", type=float, default=1707.0,
+                   help="RF center frequency written to the .rfcatcher metadata (default 1707 MHz)")
+    p.add_argument("--rf-bandwidth-mhz", type=float, default=4.0,
+                   help="analog bandwidth written to the .rfcatcher metadata (default 4 MHz)")
+    p.add_argument("--rfcatcher-template", type=str, default=None,
+                   help="a real .rfcatcher recording (or its .json) whose device fields (serial, firmware, "
+                        "gain, level) are copied into the new file's metadata; default: built-in AWS_2 ones")
     p.add_argument("-o", "--output", type=str, default=None,
                    help="output path; default: output/qpsk_ccsds_<fs>Msps_<n_cadu>cadu_<timestamp>.iq")
     return p.parse_args()
@@ -323,7 +334,11 @@ def main():
     else:
         print(f"[9/9] No resampling (native {output_fs/1e6:.3f} MS/s), format={args.dtype}, peak={args.peak}")
 
+    if args.rfcatcher:
+        args.dtype = "int16"
     output_path = args.output
+    if output_path is not None and args.rfcatcher and output_path.lower().endswith(".rfcatcher"):
+        output_path = output_path[:-len(".rfcatcher")] + ".iq"
     if output_path is None:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -355,6 +370,20 @@ def main():
     meta_path = output_path.rsplit(".", 1)[0] + ".meta.json"
     with open(meta_path, "w") as f:
         json.dump(export_result["meta"], f, indent=2)
+
+    if args.rfcatcher:
+        template = None
+        if args.rfcatcher_template:
+            template = rfcatcher.read_metadata(args.rfcatcher_template)
+            if template is None:
+                raise SystemExit(f"error: no RF-Catcher metadata found in {args.rfcatcher_template}")
+        rf_meta = rfcatcher.build_metadata(
+            export_result["meta"]["output_sample_rate"], export_result["meta"]["output_n_samples"],
+            args.rf_frequency_mhz * 1e6, args.rf_bandwidth_mhz * 1e6, template=template)
+        rf_path = output_path.rsplit(".", 1)[0] + ".rfcatcher"
+        rfcatcher.write_rfcatcher(output_path, rf_path, rf_meta)
+        os.remove(output_path)
+        output_path = rf_path
 
     output_n_samples = export_result["meta"]["output_n_samples"]
     output_bytes = os.path.getsize(output_path)
