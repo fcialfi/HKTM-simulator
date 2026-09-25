@@ -26,6 +26,7 @@ from ccsds_chain.pulse_shaping import matched_filter_sample, rrc_taps
 from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
 from analyze_recording import analyze, report_lines
+from ccsds_chain import rfcatcher
 
 # Exported IQ files are written here (same convention as generate_signal.py's
 # CLI default) rather than held fully in memory: export_chain() streams
@@ -750,6 +751,17 @@ _PLOT_LAYOUT = dict(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_
 _GRID = dict(gridcolor="rgba(255,255,255,0.06)")
 
 
+def _on_recording_path_change():
+    """Path callback: read a .rfcatcher recording's metadata (headers only,
+    fast even for multi-GB files) and take the sample rate from it."""
+    path = st.session_state.get("rec_path", "").strip().strip('"').strip("'")
+    meta = rfcatcher.read_metadata(path) if path and os.path.isfile(path) else None
+    st.session_state["rec_file_meta"] = meta
+    rate = rfcatcher.parse_quantity((meta or {}).get("rate"))
+    if rate:
+        st.session_state["rec_fs"] = float(rate)
+
+
 def _apply_analysis_to_generator():
     """Button callback: copy the measured parameters ticked under
     "Reproduce it in the generator" into the sidebar widgets. Runs before
@@ -768,7 +780,7 @@ def _apply_analysis_to_generator():
     if apply_modulation:
         st.session_state["modulation"] = r["modulation"]
     frames = r.get("frames") or {}
-    if apply_randomizer and "randomizer" in frames:
+    if apply_randomizer and frames.get("randomizer") in ("long", "short", "none"):
         label = {"long": "Long (131071-bit)", "short": "Short (255-bit, legacy)", "none": "None"}[frames["randomizer"]]
         fmt_label = ss.get("input_format_label", next(iter(INPUT_FORMAT_OPTIONS)))
         if frames["randomizer"] != "none" and INPUT_FORMAT_OPTIONS[fmt_label] == "cadu":
@@ -782,7 +794,8 @@ def _apply_analysis_to_generator():
     applied = [name for name, on in [
         (f"symbol rate {ss.get('symbol_rate_input', 0):,} S/s".replace(",", " "), apply_rs),
         (f"modulation {r['modulation']}", apply_modulation),
-        (f"randomizer {frames.get('randomizer')}", apply_randomizer and "randomizer" in frames),
+        (f"randomizer {frames.get('randomizer')}",
+         apply_randomizer and frames.get("randomizer") in ("long", "short", "none")),
         (f"carrier offset {r['fc']:+.0f} Hz", apply_carrier)] if on]
     ss["_applied_from_analysis"] = applied
     ss["main_tab"] = "Signal generator"
@@ -829,12 +842,21 @@ with tab_rec:
         )
         rec_path = st.text_input(
             "Recording file path", key="rec_path", placeholder=r"C:\RF-Catcher\AWS_2_split.rfcatcher",
+            on_change=_on_recording_path_change,
             help="Full path on this computer. In Windows Explorer: Shift + right-click the file -> 'Copy as path'.",
         ).strip().strip('"').strip("'")
+        rec_file_meta = st.session_state.get("rec_file_meta")
+        if rec_file_meta:
+            st.caption(
+                f"Recorder metadata: RF {rec_file_meta.get('frequency')} · rate {rec_file_meta.get('rate')} "
+                f"(sample rate set from it) · bandwidth {rec_file_meta.get('bandwidth')} · "
+                f"duration {rec_file_meta.get('duration')} · recorded {rec_file_meta.get('record.start_time')}"
+            )
         ra1, ra2, ra3, ra4 = st.columns(4)
         with ra1:
-            rec_fs = st.number_input("Recording sample rate (Hz)", min_value=1.0, value=10_000_000.0,
-                                     step=1e6, format="%.0f", key="rec_fs")
+            st.session_state.setdefault("rec_fs", 10_000_000.0)
+            rec_fs = st.number_input("Recording sample rate (Hz)", min_value=1.0, step=1e6, format="%.0f",
+                                     key="rec_fs", help="Filled in from a .rfcatcher file's own metadata.")
         with ra2:
             rec_offset = st.number_input("Start at (s)", min_value=0.0, value=0.0, step=1.0, key="rec_offset")
         with ra3:
@@ -893,6 +915,9 @@ with tab_rec:
                 ("Es/N0", f"{rec['esn0_evm_db']:.1f} dB", f"EVM {rec['evm_pct']:.1f}%"),
                 ("Spectral lines", f"{rec['n_lines']}", "random-like" if rec["n_lines"] < 20 else "periodic content"),
             ]
+            if rec.get("rfcatcher_meta"):
+                m = rec["rfcatcher_meta"]
+                summary.append(("RF frequency", str(m.get("frequency")), f"bandwidth {m.get('bandwidth')}"))
             if "randomizer" in frames:
                 summary += [
                     ("Randomizer", frames["randomizer"], f"{frames['cadu_bytes']}-byte CADUs"),
@@ -945,9 +970,9 @@ with tab_rec:
             with ac2:
                 st.checkbox(f"Modulation ({rec['modulation']})", value=True, key="apply_mod")
             with ac3:
+                rand_known = frames.get("randomizer") in ("long", "short", "none")
                 st.checkbox(f"Randomizer ({frames.get('randomizer', 'not decoded')})",
-                            value="randomizer" in frames, disabled="randomizer" not in frames,
-                            key="apply_rand")
+                            value=rand_known, disabled=not rand_known, key="apply_rand")
             with ac4:
                 st.checkbox(f"Carrier offset ({rec['fc']:+.0f} Hz)", value=False, key="apply_fc")
             bc1, bc2 = st.columns(2)
@@ -1143,10 +1168,10 @@ with tab_gen:
             unsafe_allow_html=True,
         )
         st.caption(
-            "Produces a raw baseband IQ file (no header, interleaved I0,Q0,I1,Q1,...) "
-            "for an IQ recorder/replayer such as RF-Catcher's Capture & Playback. The "
-            "file carries no carrier/frequency information -- set the intended RF "
-            "center frequency manually on the playback instrument."
+            "Produces a baseband IQ file for an IQ recorder/replayer such as RF-Catcher's "
+            "Capture & Playback: either a .rfcatcher recording, which carries its own "
+            "sample rate, RF frequency and bandwidth, or a raw file (no header, "
+            "interleaved I0,Q0,I1,Q1,...) whose rate and frequency are set by hand."
         )
 
         symbols_per_cadu = len(result.symbols) / params.n_cadu
@@ -1180,16 +1205,20 @@ with tab_gen:
         fmt_col1, fmt_col2, fmt_col3 = st.columns(3)
         with fmt_col1:
             output_dtype_label = st.selectbox(
-                "Output format", ["float32 ([-1, +1])", "int16 (12-bit, RF-Catcher)"],
+                "Output format",
+                ["RF-Catcher recording (.rfcatcher)", "raw int16 (12-bit, RF-Catcher)", "raw float32 ([-1, +1])"],
+                key="output_format",
                 help=(
-                    "Sample data type for the raw IQ file. float32 is compatible "
-                    "with most modern SDR tooling; int16 matches the RF-Catcher "
-                    "(TestTree) format -- little-endian, 12 significant bits in "
-                    "two's complement, range [-2048, 2047] -- check what your "
-                    "IQ recorder/replayer requires."
+                    "'.rfcatcher' is RF-Catcher's own recording format: the int16 IQ "
+                    "samples plus the metadata (sample rate, RF frequency, bandwidth, "
+                    "duration) the replayer reads to set itself up. The raw formats "
+                    "carry no metadata: set rate and frequency by hand on the "
+                    "instrument. int16 is little-endian, 12 significant bits, range "
+                    "[-2048, 2047]; float32 suits most other SDR tooling."
                 ),
             )
-            output_dtype = "int16" if output_dtype_label.startswith("int16") else "float32"
+            export_rfcatcher = output_dtype_label.startswith("RF-Catcher")
+            output_dtype = "float32" if "float32" in output_dtype_label else "int16"
         with fmt_col2:
             output_peak = st.number_input(
                 "Peak amplitude", min_value=0.1, max_value=1.0, value=0.9, step=0.05,
@@ -1237,6 +1266,50 @@ with tab_gen:
             size_warning = ""
         st.caption(f"~{export_duration_s:.2f} s of signal, ~{export_mb:,.0f} MB file{size_warning}")
 
+        rf_frequency_hz = rf_bandwidth_hz = None
+        rf_template = None
+        if export_rfcatcher:
+            # Defaults from the last analyzed recording's own metadata when
+            # there is one, so a regenerated pass replays like the original.
+            rec_meta = (st.session_state.get("recording_analysis") or {}).get("rfcatcher_meta") or {}
+            template_default = rfcatcher.DEFAULT_TEMPLATE
+            rc1, rc2, rc3 = st.columns([1, 1, 2])
+            with rc1:
+                rf_frequency_mhz = st.number_input(
+                    "RF center frequency (MHz)", min_value=0.0, step=1.0, format="%.3f", key="rf_frequency_mhz",
+                    value=(rfcatcher.parse_quantity(rec_meta.get("frequency")) or 1707e6) / 1e6,
+                    help="Written to the file's metadata: the frequency the replayer transmits at.",
+                )
+            with rc2:
+                rf_bandwidth_mhz = st.number_input(
+                    "Analog bandwidth (MHz)", min_value=0.1, step=0.5, format="%.3f", key="rf_bandwidth_mhz",
+                    value=(rfcatcher.parse_quantity(rec_meta.get("bandwidth"))
+                           or rfcatcher.parse_quantity(template_default["bandwidth"])) / 1e6,
+                    help=(f"The replayer's analog filter bandwidth. Must cover the occupied "
+                          f"bandwidth ({bw_theoretical / 1e6:.3f} MHz) and fit within the sample rate."),
+                )
+            with rc3:
+                rf_template_path = st.text_input(
+                    "Device metadata from (optional)", key="rf_template_path",
+                    placeholder=r"C:\RF-Catcher\AWS_2_split.rfcatcher",
+                    help=("A real .rfcatcher recording (or its .json) whose device fields -- serial, "
+                          "firmware, gain, signal level -- are copied into the new file. Empty: the "
+                          "last analyzed recording's, or AWS_2's built in."),
+                ).strip().strip('"').strip("'")
+            if rf_template_path:
+                rf_template = rfcatcher.read_metadata(rf_template_path) if os.path.isfile(rf_template_path) else None
+                if rf_template is None:
+                    st.warning("No RF-Catcher metadata found in that file: using the built-in device fields.")
+            elif rec_meta:
+                rf_template = rec_meta
+            rf_frequency_hz, rf_bandwidth_hz = rf_frequency_mhz * 1e6, rf_bandwidth_mhz * 1e6
+            if rf_bandwidth_hz >= export_output_fs:
+                st.warning(f"Bandwidth {rf_bandwidth_mhz:.3f} MHz is not below the sample rate "
+                           f"({export_output_fs / 1e6:.3f} Msps): the replayer may reject it.")
+            if rf_bandwidth_hz < bw_theoretical:
+                st.warning(f"Bandwidth {rf_bandwidth_mhz:.3f} MHz is narrower than the occupied bandwidth "
+                           f"({bw_theoretical / 1e6:.3f} MHz): the replayer's filter would cut the signal.")
+
         generate_clicked = st.button("Generate export file", width='stretch')
 
         export_key = (
@@ -1244,6 +1317,7 @@ with tab_gen:
             params.conv_rate, params.conv_invert_g2, params.randomizer, params.input_format, params.rrc_alpha,
             params.rrc_span, params.sps, params.symbol_rate, params.seed, payload_mode,
             output_dtype, output_peak, resample_enabled, target_fs if resample_enabled else None,
+            export_rfcatcher, rf_frequency_hz, rf_bandwidth_hz,
         )
         if generate_clicked:
             export_params = dataclasses.replace(params, n_cadu=int(export_n_cadu))
@@ -1282,6 +1356,14 @@ with tab_gen:
                 )
                 progress_bar.empty()
                 meta = export_result["meta"]
+                if export_rfcatcher:
+                    rf_path = out_path[:-len(".iq")] + ".rfcatcher"
+                    rf_meta = rfcatcher.build_metadata(
+                        meta["output_sample_rate"], meta["output_n_samples"], rf_frequency_hz, rf_bandwidth_hz,
+                        template=rf_template)
+                    rfcatcher.write_rfcatcher(out_path, rf_path, rf_meta)
+                    os.remove(out_path)
+                    out_path = rf_path
                 file_size = os.path.getsize(out_path)
                 st.session_state["export_data"] = {
                     "path": out_path,
@@ -1289,8 +1371,10 @@ with tab_gen:
                     "filename": os.path.basename(out_path),
                     "file_size": file_size,
                     "caption": (
-                        f"Format: raw interleaved {output_dtype} (I0,Q0,I1,Q1,...) &middot; "
-                        f"{file_size/1e6:.2f} MB &middot; {meta['output_n_samples']:,} samples @ "
+                        (f"Format: RF-Catcher recording (int16 IQ + metadata: {rf_frequency_hz / 1e6:.3f} MHz, "
+                         f"{rf_bandwidth_hz / 1e6:.3f} MHz bandwidth) &middot; " if export_rfcatcher else
+                         f"Format: raw interleaved {output_dtype} (I0,Q0,I1,Q1,...) &middot; ")
+                        + f"{file_size/1e6:.2f} MB &middot; {meta['output_n_samples']:,} samples @ "
                         f"{meta['output_sample_rate']/1e6:.3f} MS/s &middot; "
                         f"CADU: {export_n_cadu} x {export_result['cadu_bytes']} bytes"
                     ),
@@ -1309,7 +1393,8 @@ with tab_gen:
                 elif data["file_size"] <= _DOWNLOAD_BUTTON_SIZE_LIMIT:
                     with open(data["path"], "rb") as f:
                         iq_bytes = f.read()
-                    st.download_button("Download IQ file", data=iq_bytes,
+                    st.download_button("Download .rfcatcher file" if data["filename"].endswith(".rfcatcher")
+                                        else "Download IQ file", data=iq_bytes,
                                         file_name=data["filename"], mime="application/octet-stream",
                                         width='stretch')
                 else:

@@ -33,6 +33,7 @@ import numpy as np
 import scipy.fft as sfft
 import scipy.signal as ss
 
+from ccsds_chain import rfcatcher
 from ccsds_chain.pulse_shaping import rrc_taps
 from ccsds_chain.scrambler import pn_sequence
 from ccsds_chain.utils import bits_to_bytes, bytes_to_bits
@@ -322,6 +323,7 @@ def analyze_frames(bits: np.ndarray) -> dict:
         scored[mode] = (header_score(bodies ^ pn), bodies ^ pn)
     randomizer = max(scored, key=lambda m: scored[m][0])
     frames = scored[randomizer][1]
+    confidence = scored[randomizer][0] / 2
 
     words = (frames[:, 0].astype(int) << 8) | frames[:, 1]
     fhp = ((frames[:, 4].astype(int) << 8) | frames[:, 5]) & 0x7FF
@@ -332,8 +334,11 @@ def analyze_frames(bits: np.ndarray) -> dict:
         "n_cadu": len(cadus),
         "cadu_bytes": cadu_bits // 8,
         "asm_spacing_consistent": bool(np.all(spacing % cadu_bits == 0)),
-        "randomizer": randomizer,
-        "randomizer_confidence": scored[randomizer][0] / 2,
+        # Below half the frames passing the header check, none of the three
+        # candidates is convincing (e.g. random test payload, no real TM
+        # headers): report it as undetermined rather than guess.
+        "randomizer": randomizer if confidence >= 0.5 else "undetermined",
+        "randomizer_confidence": confidence,
         "scid": sorted(set(((words >> 4) & 0x3FF).tolist())),
         "vcid_counts": dict(zip(vcids.tolist(), counts.tolist())),
         "idle_frames_pct": 100 * np.mean(fhp == 0x7FE),
@@ -394,7 +399,7 @@ def plot_report(path: str, r: dict, title: str):
     fig.savefig(path, dpi=130)
 
 
-def analyze(path: str, fs: float, offset_s: float = 0.0, duration_s: float = 1.0,
+def analyze(path: str, fs: Optional[float], offset_s: float = 0.0, duration_s: float = 1.0,
             dtype: str = "int16", header_bytes: int = 0, rs_nominal: float = 1.785e6,
             alpha: float = 0.35, max_carrier_offset: float = 200e3, modulation: str = "auto",
             do_decode: bool = True, decode_symbols: int = 400_000,
@@ -406,10 +411,17 @@ def analyze(path: str, fs: float, offset_s: float = 0.0, duration_s: float = 1.0
             progress(frac, msg)
 
     step(0.0, "Reading the recording...")
+    # A .rfcatcher recording carries its own metadata (sample rate, RF
+    # frequency, bandwidth...): use its rate when none is given.
+    meta = rfcatcher.read_metadata(path)
+    if fs is None:
+        fs = rfcatcher.parse_quantity((meta or {}).get("rate"))
+        if not fs:
+            raise ValueError("no sample rate given, and none found in the file's metadata")
     x, desc = load_iq(path, fs, offset_s, duration_s, dtype, header_bytes)
     rms = float(np.sqrt(np.mean(np.abs(x) ** 2)))
     full_scale = 2048 if dtype == "int16" else 1.0
-    r = {"file": desc, "dtype": dtype, "rms": rms, "peak": float(np.abs(x).max()),
+    r = {"file": desc, "dtype": dtype, "fs": fs, "rfcatcher_meta": meta, "rms": rms, "peak": float(np.abs(x).max()),
          "dbfs": 20 * np.log10(max(rms, 1e-12) / full_scale), "rs_nominal": rs_nominal}
 
     step(0.05, "Estimating symbol rate and carrier...")
@@ -453,7 +465,13 @@ def analyze(path: str, fs: float, offset_s: float = 0.0, duration_s: float = 1.0
 
 def report_lines(r: dict) -> list:
     """Human-readable report of an `analyze()` result."""
-    lines = [f"[1] File: {r['file']}",
+    lines = [f"[1] File: {r['file']}"]
+    meta = r.get("rfcatcher_meta")
+    if meta:
+        lines.append(f"    Recorder metadata: RF {meta.get('frequency')}, rate {meta.get('rate')}, "
+                     f"bandwidth {meta.get('bandwidth')}, gain {meta.get('gain.t0')}, "
+                     f"level {meta.get('signal.level.t0')}, recorded {meta.get('record.start_time')}")
+    lines += [
              f"    Level: rms {r['rms']:.1f}, peak {r['peak']:.1f} ({r['dbfs']:.1f} dBFS rms"
              f"{' vs 12-bit full scale' if r['dtype'] == 'int16' else ''})",
              f"[2] Symbol rate: {r['rs']:,.1f} sps  ({r['rs'] - r['rs_nominal']:+,.1f} Hz, {r['rs_ppm']:+.1f} ppm "
@@ -493,7 +511,8 @@ def report_lines(r: dict) -> list:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("recording", help=".rfcatcher (tar) or raw interleaved IQ file")
-    ap.add_argument("--fs", type=float, required=True, help="recording sample rate, Hz (e.g. 10e6)")
+    ap.add_argument("--fs", type=float, default=None,
+                    help="recording sample rate, Hz (e.g. 10e6); default: read from the .rfcatcher metadata")
     ap.add_argument("--dtype", choices=["int16", "float32"], default="int16")
     ap.add_argument("--header-bytes", type=int, default=0, help="bytes to skip in a raw (non-tar) file")
     ap.add_argument("--offset", type=float, default=0.0, help="start of the analyzed slice, s")

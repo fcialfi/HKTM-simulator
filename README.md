@@ -247,6 +247,16 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
     information: this must be set manually on the playback instrument, e.g.
     RF-Catcher's TX Freq field).
 
+    Or, with `--rfcatcher` (GUI: output format "RF-Catcher recording"), an
+    RF-Catcher **`.rfcatcher` recording**, which the replayer sets itself up
+    from: a tar archive of `<name>.iq` (int16, as above) and `<name>.json`,
+    the recorder metadata -- `rate`, `frequency` (`--rf-frequency-mhz`),
+    `bandwidth` (`--rf-bandwidth-mhz`), `duration`, record times and sizes,
+    plus device fields (serial, firmware, gain, signal level) copied from a
+    real recording given with `--rfcatcher-template` (built-in default:
+    AWS_2's). Tar headers are byte-for-byte what RF-Catcher itself writes
+    (checked against a real recording); see `ccsds_chain/rfcatcher.py`.
+
 **Constant-memory generation (`export_chain`)**: both the CLI and the GUI's
 "Generate export file" button use `ccsds_chain.pipeline.export_chain()`,
 which processes CADUs in batches (sized to stay around ~64 MB of native IQ
@@ -302,6 +312,7 @@ python generate_signal.py --n-cadu 500 --randomizer long -o test.raw
 python generate_signal.py --rs-e 8 --interleave-depth 2 --conv-rate 3/4 -o test2.raw
 python generate_signal.py --modulation BPSK -o test3.raw
 python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # for an RF Recorder/Replayer
+python generate_signal.py --rfcatcher --target-fs 10e6 --rf-frequency-mhz 1707   # RF-Catcher recording
 
 # 3 Virtual Channels, VC 0 getting twice VC 1/2's share of frames -- for
 # validating a receiver's VC identification/routing
@@ -343,12 +354,12 @@ is not given, the file is saved to `output/` as
 ### Analyzing a real recording
 
 `analyze_recording.py` characterizes a real recorded pass (RF-Catcher
-`.rfcatcher` files are tar archives around an int16 IQ member and are
-unwrapped automatically; raw IQ works too), so a simulated signal can be
+`.rfcatcher` files are unwrapped automatically and their metadata supplies
+the sample rate, so `--fs` is only needed for raw IQ), so a simulated signal can be
 matched to it or a receiver problem traced back to the signal:
 
 ```bash
-python analyze_recording.py C:\RF-Catcher\AWS_2_split.rfcatcher --fs 10e6 \
+python analyze_recording.py C:\RF-Catcher\AWS_2_split.rfcatcher \
     --offset 30 --duration 1 --plot aws2.png
 ```
 
@@ -436,12 +447,11 @@ running the decoder for real, against real injected errors, can show.
   pairs bits into a symbol.
 - **NRZ-L convention**: bit 1 -> +1, bit 0 -> -1; to be checked against the
   polarity expected by the receiver/tool.
-- **IQ file format**: raw interleaved (float32/int16, no header) follows
-  the IQ format spec provided for the target Recorder/Replayer; it still
-  needs to be confirmed with an end-to-end test on real hardware whether
-  RF-Catcher (TestTree)'s "IQ Converter" tool requires a different
-  `.rfcatcher` format (with its own header/metadata) instead of the raw
-  binary produced here.
+- **`.rfcatcher` output**: built to match a real RF-Catcher recording
+  (headers byte for byte, same metadata keys and formats), but not yet
+  confirmed by playing one back on the instrument. Which metadata fields
+  the replayer actually checks is unknown, so device fields are copied from
+  a real recording rather than invented.
 - **Payload**: currently pseudo-random test data (or raw Transfer Frames
   from a file). A real primary header (Spacecraft ID, VCID, Master/Virtual
   Channel Frame Count) can be built in with `--vcid-list` (see above), but
