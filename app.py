@@ -1281,13 +1281,23 @@ with tab_gen:
                     help="Written to the file's metadata: the frequency the replayer transmits at.",
                 )
             with rc2:
-                rf_bandwidth_mhz = st.number_input(
-                    "Analog bandwidth (MHz)", min_value=0.1, step=0.5, format="%.3f", key="rf_bandwidth_mhz",
-                    value=(rfcatcher.parse_quantity(rec_meta.get("bandwidth"))
-                           or rfcatcher.parse_quantity(template_default["bandwidth"])) / 1e6,
-                    help=(f"The replayer's analog filter bandwidth. Must cover the occupied "
-                          f"bandwidth ({bw_theoretical / 1e6:.3f} MHz) and fit within the sample rate."),
+                auto_bw = rfcatcher.linked_bandwidth(export_output_fs)
+                rf_bandwidth_auto = st.checkbox(
+                    f"Bandwidth: automatic ({auto_bw / 1e6:.3f} MHz)", value=True, key="rf_bandwidth_auto",
+                    help=("RF-Catcher's own default: bandwidth linked to the sample rate, which is set to "
+                          "110% of it (so bandwidth = sample rate / 1.1). Bandwidth is only settable in "
+                          "Capture mode, so for playback it's descriptive metadata; untick to write "
+                          "another value (e.g. the 4 MHz of an original recording)."),
                 )
+                if rf_bandwidth_auto:
+                    rf_bandwidth_mhz = auto_bw / 1e6
+                else:
+                    rf_bandwidth_mhz = st.number_input(
+                        "Bandwidth (MHz)", min_value=1.0, max_value=55.9, step=0.5, format="%.3f",
+                        key="rf_bandwidth_mhz",
+                        value=min(max((rfcatcher.parse_quantity(rec_meta.get("bandwidth"))
+                                       or rfcatcher.parse_quantity(template_default["bandwidth"])) / 1e6, 1.0), 55.9),
+                    )
             with rc3:
                 rf_template_path = st.text_input(
                     "Device metadata from (optional)", key="rf_template_path",
@@ -1303,12 +1313,16 @@ with tab_gen:
             elif rec_meta:
                 rf_template = rec_meta
             rf_frequency_hz, rf_bandwidth_hz = rf_frequency_mhz * 1e6, rf_bandwidth_mhz * 1e6
-            if rf_bandwidth_hz >= export_output_fs:
-                st.warning(f"Bandwidth {rf_bandwidth_mhz:.3f} MHz is not below the sample rate "
-                           f"({export_output_fs / 1e6:.3f} Msps): the replayer may reject it.")
-            if rf_bandwidth_hz < bw_theoretical:
-                st.warning(f"Bandwidth {rf_bandwidth_mhz:.3f} MHz is narrower than the occupied bandwidth "
-                           f"({bw_theoretical / 1e6:.3f} MHz): the replayer's filter would cut the signal.")
+            for problem in rfcatcher.check_parameters(export_output_fs, rf_frequency_hz, rf_bandwidth_hz,
+                                                      bw_theoretical):
+                st.warning(problem[0].upper() + problem[1:] + ".")
+            rec_rate = rfcatcher.parse_quantity(rec_meta.get("rate") or template_default["rate"])
+            if rec_rate and abs(export_output_fs - rec_rate) > 1:
+                st.caption(
+                    f"Sample rate {export_output_fs / 1e6:.3f} Msps differs from the recording's "
+                    f"{rec_rate / 1e6:.3f} Msps. RF-Catcher's rates are divisions of its ADC clock, so not "
+                    f"every value is available: if the replayer rejects this one, tick 'Resample to fixed "
+                    f"rate' and use {rec_rate:,.0f} Hz.".replace(",", " "))
 
         generate_clicked = st.button("Generate export file", width='stretch')
 

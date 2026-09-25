@@ -106,3 +106,17 @@ def test_randomizer_undetermined_without_tm_headers():
     prep = _prepare_payload(p)
     bits = np.concatenate([_cadu_bits(p, prep, i) for i in range(p.n_cadu)])
     assert ar.analyze_frames(bits)["randomizer"] == "undetermined"
+
+
+def test_linked_bandwidth_and_parameter_checks():
+    assert rfcatcher.linked_bandwidth(10e6) == pytest.approx(9.091e6)
+    assert rfcatcher.linked_bandwidth(36e6) == pytest.approx(32.727e6)  # manual: 36 Msps <-> ~32 MHz
+    assert rfcatcher.linked_bandwidth(0.5e6) == 1e6  # clamped to RF-Catcher's 1 MHz minimum
+    assert rfcatcher.check_parameters(10e6, 1707e6, 4e6, 2.41e6) == []
+    assert rfcatcher.check_parameters(10e6, 1707e6, rfcatcher.linked_bandwidth(10e6), 2.41e6) == []
+    problems = rfcatcher.check_parameters(7.14e6, 50e6, 8e6, 2.41e6)
+    assert any("outside" in p and "RF frequency" in p for p in problems)
+    assert any("not below the sample rate" in p for p in problems)
+    assert any("narrower" in p for p in rfcatcher.check_parameters(10e6, 1707e6, 2e6, 2.41e6))
+    meta = rfcatcher.build_metadata(10e6, 1000, 1707e6, None)
+    assert meta["bandwidth"] == "9.091 MHz"
