@@ -362,19 +362,22 @@ shows the spectrum, the constellation after carrier recovery and the
 residual carrier phase; `--save-frames` writes the decoded frames as ASM +
 de-randomized Transfer Frame records, loadable as `asm_frame` input.
 
-The same analysis is in the GUI, in the "Analyze a real recording" panel
-above the live preview: enter the file's local path (it is read from disk,
-not uploaded through the browser, so multi-GB files are fine), pick the
-slice, and click "Analyze recording". From the results, "Apply to
+Only `--duration` seconds from `--offset` are read, by seeking straight to
+them, so multi-GB recordings are fine. Run time and memory depend on the
+slice length, never on the file size: about 15 s and ~2 GB per second of
+signal, plus ~15 s of decoding, which is pure Python and limited by default
+to the first 400 000 symbols (~40 CADUs; `--decode-symbols` to change it,
+`--no-decode` to skip it). A 1 s slice is plenty.
+
+The same analysis is in the GUI's "Recording analysis" tab (next to
+"Signal generator"): enter the file's local path (it is read from disk,
+not uploaded through the browser), pick the slice (up to 2 s) and click
+"Analyze recording". Under "Reproduce it in the generator", "Apply to
 generator" copies the measured symbol rate (rounded to 50 Hz so resampling
 to the recorder's rate stays exact), modulation, randomizer and optionally
-the carrier offset into the sidebar, and the decoded frames can be
-downloaded to regenerate the recorded content bit for bit. Only `--duration` seconds from `--offset` are read
-(memory-mapped), so multi-GB recordings are fine; decoding is pure Python
-and is limited by default to the first 400 000 symbols (~40 CADUs, ~15 s;
-`--decode-symbols` to change it, `--no-decode` to skip it). Run time
-depends on the slice length, never on the file size: about 30 s in total
-for a 1 s slice.
+the carrier offset into the generator's settings and switches back to the
+generator tab; the decoded frames can also be downloaded to regenerate the
+recorded content bit for bit.
 
 ### Tests
 
