@@ -27,6 +27,7 @@ from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
 from analyze_recording import analyze, report_lines
 from ccsds_chain import rfcatcher
+import licensing
 
 # Exported IQ files are written here (same convention as generate_signal.py's
 # CLI default) rather than held fully in memory: export_chain() streams
@@ -173,7 +174,21 @@ if os.path.exists(LOGO_PATH):
     else:
         st.sidebar.image(LOGO_PATH)
 
+# Licence (packaged executable only, see licensing.py): stop here with an
+# explanation if it is missing, invalid or expired.
+_license = licensing.check_license()
+if not _license.valid:
+    st.error(f"**{licensing.PRODUCT}: licence not valid.**\n\n{_license.message}\n\n"
+             "Contact the supplier for a new licence file.")
+    st.stop()
+
 with st.sidebar:
+    if _license.enforced:
+        if _license.expiring_soon:
+            st.warning(f"Licence expires on {_license.expires:%d %B %Y} "
+                       f"({_license.days_left} days left).")
+        else:
+            st.caption(f"Licensed to {_license.customer} · valid until {_license.expires:%d %B %Y}")
     st.caption("Signal generator settings, in the order the chain applies them.")
     with st.expander("1 · Modulation & symbol rate", expanded=True):
         modulation = st.selectbox(

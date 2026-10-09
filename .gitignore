@@ -9,3 +9,6 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+# Licensing: never commit the signing key or issued licence files
+*private_key*.pem
+license.key

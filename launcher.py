@@ -84,6 +84,22 @@ def main():
     print("  Keep this window open - closing it stops the program.")
     print("=" * 64, flush=True)
     _status("Starting...")
+    import licensing
+
+    lic = licensing.check_license()
+    if not lic.valid:
+        # Stop before the slow GUI start-up; the console window stays open
+        # so the message can be read.
+        _close_splash()
+        print(f"\nLICENCE NOT VALID: {lic.message}")
+        print("Contact the supplier for a new licence file.\n")
+        try:
+            input("Press Enter to close this window.")
+        except EOFError:
+            pass
+        sys.exit(1)
+    if lic.enforced:
+        print(lic.message, flush=True)
     base_dir = _base_dir()
     app_path = os.path.join(base_dir, "app.py")
     if not os.path.exists(app_path):
