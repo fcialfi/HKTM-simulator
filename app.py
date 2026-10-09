@@ -73,6 +73,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: radial-gradient(ellipse 120% 80% at 50% -10%, #142033 0%, #0b0f19 55%); }
 
 #MainMenu, footer { visibility: hidden; }
+[data-testid="stSidebarLogo"] { height: 3.2rem; max-width: 100%; margin-top: 0.4rem; }
 header[data-testid="stHeader"] { background: transparent; }
 header[data-testid="stHeader"] [data-testid="stMainMenu"],
 header[data-testid="stHeader"] [data-testid="stAppDeployButton"] { visibility: hidden; }
