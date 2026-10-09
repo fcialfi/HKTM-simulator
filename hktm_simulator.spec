@@ -6,8 +6,10 @@
 #   pip install -r requirements.txt pyinstaller
 #   pyinstaller hktm_simulator.spec
 #
-# Result: dist/HKTM-CCSDS-Signal-Generator(.exe) -- a single file, no
-# separate Python install needed on the machine that runs it.
+# Result (default, folder mode): dist/HKTM-CCSDS-Signal-Generator/ with
+# HKTM-CCSDS-Signal-Generator(.exe) inside; zip the folder to distribute it.
+# No separate Python install is needed on the machine that runs it.
+# Set ONEFILE = True below for a single, slower-starting .exe instead.
 
 from PyInstaller.utils.hooks import collect_all
 
@@ -52,10 +54,19 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-# Splash screen: shown by the bootloader as soon as the .exe is started,
-# i.e. *while* the one-file bundle (a few hundred MB) is being unpacked to a
-# temp folder, before any Python code can run or print. launcher.py updates
-# its status line and closes it once the GUI server answers.
+# Build mode. ONEFILE = False (default) builds a folder,
+# dist/HKTM-CCSDS-Signal-Generator/, with the .exe next to its libraries
+# (in _internal/): it starts in seconds because nothing has to be unpacked,
+# and is distributed as a zip of the whole folder. ONEFILE = True builds a
+# single .exe that unpacks a few hundred MB to a temp folder at every start
+# (slow, especially with an antivirus scanning the files).
+ONEFILE = False
+NAME = "HKTM-CCSDS-Signal-Generator"
+
+# Splash screen, shown by the bootloader as soon as the .exe is started,
+# before any Python code can run or print (in one-file mode, while the
+# bundle is being unpacked). launcher.py updates its status line and closes
+# it once the GUI server answers.
 splash = Splash(
     "assets/splash.png",
     binaries=a.binaries,
@@ -67,15 +78,8 @@ splash = Splash(
     always_on_top=False,
 )
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    splash,
-    splash.binaries,
-    a.binaries,
-    a.datas,
-    [],
-    name="HKTM-CCSDS-Signal-Generator",
+_exe_options = dict(
+    name=NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -83,3 +87,9 @@ exe = EXE(
     console=True,
     icon="assets/exostaff_icon.ico",
 )
+
+if ONEFILE:
+    exe = EXE(pyz, a.scripts, splash, splash.binaries, a.binaries, a.datas, [], **_exe_options)
+else:
+    exe = EXE(pyz, a.scripts, splash, [], exclude_binaries=True, **_exe_options)
+    coll = COLLECT(exe, splash.binaries, a.binaries, a.datas, strip=False, upx=False, name=NAME)
