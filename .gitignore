@@ -3,6 +3,7 @@ __pycache__/
 *.raw
 *.meta.json
 *.png
+!assets/*.png
 .venv/
 *.egg-info/
 .pytest_cache/

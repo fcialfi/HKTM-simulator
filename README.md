@@ -251,7 +251,9 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
     RF-Catcher **`.rfcatcher` recording**, which the replayer sets itself up
     from: a tar archive of `<name>.iq` (int16, as above) and `<name>.json`,
     the recorder metadata -- `rate`, `frequency` (`--rf-frequency-mhz`),
-    `bandwidth` (`--rf-bandwidth-mhz`), `duration`, record times and sizes,
+    `bandwidth` (`--rf-bandwidth-mhz`; default RF-Catcher's own linked value,
+    sample rate / 1.1 -- bandwidth is only settable in capture mode, so for
+    playback it is descriptive), `duration`, record times and sizes,
     plus device fields (serial, firmware, gain, signal level) copied from a
     real recording given with `--rfcatcher-template` (built-in default:
     AWS_2's). Tar headers are byte-for-byte what RF-Catcher itself writes

@@ -65,7 +65,46 @@ DEFAULT_TEMPLATE = {
     "gain_info": ["76:26", "83:27"],
 }
 
-_OCTAL_SIZE_LIMIT = 8 ** 11  # 8 GiB: largest size 11 octal digits can hold
+# RF-Catcher's documented ranges (user manual, acquisition parameters).
+FREQUENCY_RANGE_HZ = (70e6, 6e9)
+BANDWIDTH_RANGE_HZ = (1e6, 55.9e6)
+# With Bandwidth and Sample Rate linked (RF-Catcher's default), the sample
+# rate is set to 110% of the bandwidth "to take the filters' shoulders into
+# account".
+LINKED_RATE_OVER_BANDWIDTH = 1.1
+
+
+def linked_bandwidth(sample_rate: float) -> float:
+    """The bandwidth RF-Catcher pairs with `sample_rate` when the two are
+    linked (sample rate = 110% of bandwidth), at its 1 kHz resolution and
+    within its 1-55.9 MHz range. Bandwidth is only settable in Capture
+    mode, so for a replayed file this is descriptive metadata."""
+    bw = round(sample_rate / LINKED_RATE_OVER_BANDWIDTH / 1e3) * 1e3
+    return min(max(bw, BANDWIDTH_RANGE_HZ[0]), BANDWIDTH_RANGE_HZ[1])
+
+
+def check_parameters(sample_rate: float, rf_frequency_hz: float, bandwidth_hz: float,
+                     occupied_bandwidth_hz: Optional[float] = None) -> list:
+    """Human-readable problems with these settings for RF-Catcher (empty if
+    none): out-of-range frequency/bandwidth, a bandwidth that doesn't fit
+    the sample rate or cuts into the signal."""
+    problems = []
+    lo, hi = FREQUENCY_RANGE_HZ
+    if not lo <= rf_frequency_hz <= hi:
+        problems.append(f"RF frequency {rf_frequency_hz / 1e6:.3f} MHz is outside RF-Catcher's "
+                        f"{lo / 1e6:.0f} MHz - {hi / 1e9:.0f} GHz range")
+    lo, hi = BANDWIDTH_RANGE_HZ
+    if not lo <= bandwidth_hz <= hi:
+        problems.append(f"bandwidth {bandwidth_hz / 1e6:.3f} MHz is outside RF-Catcher's "
+                        f"{lo / 1e6:.0f}-{hi / 1e6:.1f} MHz range")
+    if bandwidth_hz >= sample_rate:
+        problems.append(f"bandwidth {bandwidth_hz / 1e6:.3f} MHz is not below the sample rate "
+                        f"({sample_rate / 1e6:.3f} Msps)")
+    if occupied_bandwidth_hz is not None and bandwidth_hz < occupied_bandwidth_hz:
+        problems.append(f"bandwidth {bandwidth_hz / 1e6:.3f} MHz is narrower than the signal's occupied "
+                        f"bandwidth ({occupied_bandwidth_hz / 1e6:.3f} MHz)")
+    return problems
+
 
 
 # --------------------------------------------------------------------------
@@ -124,7 +163,7 @@ def _format_size(n_bytes: int) -> str:
     return f"{n_bytes / 1024 ** 2:.2f} MB"
 
 
-def build_metadata(sample_rate: float, n_samples: int, rf_frequency_hz: float, bandwidth_hz: float,
+def build_metadata(sample_rate: float, n_samples: int, rf_frequency_hz: float, bandwidth_hz: Optional[float],
                    template: Optional[dict] = None,
                    start: Optional[datetime.datetime] = None) -> dict:
     """RF-Catcher metadata for a generated IQ file: the template's device
@@ -132,6 +171,8 @@ def build_metadata(sample_rate: float, n_samples: int, rf_frequency_hz: float, b
     times and sizes set for this file, and the per-recording logs
     (overloads, sample losses, markers) emptied."""
     meta = copy.deepcopy(template if template is not None else DEFAULT_TEMPLATE)
+    if bandwidth_hz is None:
+        bandwidth_hz = linked_bandwidth(sample_rate)
     sample_size = int(meta.get("sample_size", 4))
     duration_s = n_samples / sample_rate
     start = (start or datetime.datetime.now()).replace(microsecond=0)

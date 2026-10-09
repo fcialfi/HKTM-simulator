@@ -53,6 +53,19 @@ executable from Linux or macOS.
    that runs it. It's a few hundred MB, all numpy/scipy/streamlit/plotly
    bundled in.
 
+## Logo and icon
+
+The Exostaff logo lives in `assets/`:
+
+- `exostaff_icon.ico` -- the executable's icon (Explorer, taskbar), set by
+  `icon=` in `hktm_simulator.spec`;
+- `exostaff_icon.png` -- the browser tab icon (`page_icon` in `app.py`);
+- `exostaff_logo.png` -- the logo shown at the top of the sidebar.
+
+The whole `assets/` folder is bundled into the executable (`datas` in the
+spec). To change the logo, replace these files with the same names and
+rebuild. If they are missing, the app falls back to the 📡 icon and no logo.
+
 ## If the build fails or the app errors on first launch
 
 Report the exact error back (the PyInstaller build log, or the console

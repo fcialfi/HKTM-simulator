@@ -195,8 +195,9 @@ def build_cli():
                         "rate, RF frequency and bandwidth) instead of a raw IQ file; implies --dtype int16")
     p.add_argument("--rf-frequency-mhz", type=float, default=1707.0,
                    help="RF center frequency written to the .rfcatcher metadata (default 1707 MHz)")
-    p.add_argument("--rf-bandwidth-mhz", type=float, default=4.0,
-                   help="analog bandwidth written to the .rfcatcher metadata (default 4 MHz)")
+    p.add_argument("--rf-bandwidth-mhz", type=float, default=None,
+                   help="bandwidth written to the .rfcatcher metadata (default: RF-Catcher's linked "
+                        "value, sample rate / 1.1)")
     p.add_argument("--rfcatcher-template", type=str, default=None,
                    help="a real .rfcatcher recording (or its .json) whose device fields (serial, firmware, "
                         "gain, level) are copied into the new file's metadata; default: built-in AWS_2 ones")
@@ -377,9 +378,13 @@ def main():
             template = rfcatcher.read_metadata(args.rfcatcher_template)
             if template is None:
                 raise SystemExit(f"error: no RF-Catcher metadata found in {args.rfcatcher_template}")
-        rf_meta = rfcatcher.build_metadata(
-            export_result["meta"]["output_sample_rate"], export_result["meta"]["output_n_samples"],
-            args.rf_frequency_mhz * 1e6, args.rf_bandwidth_mhz * 1e6, template=template)
+        out_rate = export_result["meta"]["output_sample_rate"]
+        rf_bw = args.rf_bandwidth_mhz * 1e6 if args.rf_bandwidth_mhz is not None else rfcatcher.linked_bandwidth(out_rate)
+        for problem in rfcatcher.check_parameters(out_rate, args.rf_frequency_mhz * 1e6, rf_bw,
+                                                  params.symbol_rate * (1 + params.rrc_alpha)):
+            print(f"WARNING: {problem}")
+        rf_meta = rfcatcher.build_metadata(out_rate, export_result["meta"]["output_n_samples"],
+                                           args.rf_frequency_mhz * 1e6, rf_bw, template=template)
         rf_path = output_path.rsplit(".", 1)[0] + ".rfcatcher"
         rfcatcher.write_rfcatcher(output_path, rf_path, rf_meta)
         os.remove(output_path)
