@@ -74,6 +74,47 @@ The whole `assets/` folder is bundled into the executable (`datas` in the
 spec). To change the logo, replace these files with the same names and
 rebuild. If they are missing, the app falls back to the 📡 icon and no logo.
 
+## Time-limited licence
+
+The executable can be restricted with a licence file that expires on a
+given date (`licensing.py`). A licence is a small `license.key` file, placed
+next to the `.exe`, with the customer name and the expiry date, signed with
+a private key that only the issuer has. The executable contains only the
+public key: it can check a licence but cannot make one, and editing the file
+(e.g. a later date) invalidates it. Without a valid licence the program
+stops at start-up with an explanation; within 30 days of the expiry date
+the GUI shows a warning.
+
+1. **Once:** create the key pair (needs `pip install cryptography`, already
+   in `requirements.txt`):
+
+   ```cmd
+   python license_tool.py keygen --private-key C:\secure\hktm_license_private_key.pem
+   ```
+
+   - The **private key** goes where you say: keep it safe and outside the
+     repository. Whoever has it can issue licences; if it is lost, new
+     licences need a new key pair and a rebuild.
+   - The **public key** goes to `assets/license_public_key.pem`. Commit it:
+     every executable built from then on checks licences. Builds without
+     this file have no licence check.
+
+2. **For each customer:** issue a licence and send it with the `.exe`:
+
+   ```cmd
+   python license_tool.py issue --private-key C:\secure\hktm_license_private_key.pem --customer "Customer name" --expires 2027-12-31 -o license.key
+   ```
+
+   The expiry date is the last valid day. To extend, issue a new file; no
+   rebuild is needed.
+
+3. **Optional check:** `python license_tool.py verify license.key`
+
+Limits: this is a deterrent, not copy protection. The latest date seen is
+remembered in the user's profile, so setting the clock back is detected, but
+a determined user can still decompile a Python executable. Running from
+source (`streamlit run app.py`) is never blocked.
+
 ## If the build fails or the app errors on first launch
 
 Report the exact error back (the PyInstaller build log, or the console

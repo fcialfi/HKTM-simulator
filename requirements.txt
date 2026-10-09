@@ -3,3 +3,4 @@ scipy>=1.10
 matplotlib>=3.7
 streamlit>=1.32
 plotly>=5.20
+cryptography>=41

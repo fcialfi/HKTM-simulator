@@ -17,6 +17,7 @@ from PyInstaller.utils.hooks import collect_all
 datas = [
     ("app.py", "."),
     ("analyze_recording.py", "."),
+    ("licensing.py", "."),
     ("ccsds_chain", "ccsds_chain"),
     (".streamlit", ".streamlit"),
     ("assets", "assets"),
