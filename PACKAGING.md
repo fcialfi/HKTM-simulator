@@ -41,9 +41,13 @@ executable from Linux or macOS.
    dist\HKTM-CCSDS-Signal-Generator.exe
    ```
 
-   A console window opens (so you can see any error messages), the GUI
-   server starts, and your default browser opens automatically to
-   `http://localhost:8501`. If it doesn't open by itself, the console
+   A splash screen with the logo appears at once and shows the start-up
+   progress, and a console window opens (so you can see any error
+   messages). The first start can take a minute or two: the one-file
+   executable first unpacks its few hundred MB of libraries to a temporary
+   folder, and on Windows the antivirus usually scans them. When the GUI
+   server is up, the splash closes and your default browser opens
+   automatically to `http://localhost:8501`. If it doesn't open by itself, the console
    window prints that same address to open by hand. Closing the console
    window stops the server.
 
@@ -60,7 +64,11 @@ The Exostaff logo lives in `assets/`:
 - `exostaff_icon.ico` -- the executable's icon (Explorer, taskbar), set by
   `icon=` in `hktm_simulator.spec`;
 - `exostaff_icon.png` -- the browser tab icon (`page_icon` in `app.py`);
-- `exostaff_logo.png` -- the logo shown at the top of the sidebar.
+- `exostaff_logo.png` -- the logo shown at the top of the sidebar;
+- `splash.png` -- the start-up splash screen (`Splash` in the spec), shown
+  while the executable unpacks; `launcher.py` writes its status line and
+  closes it when the GUI is ready. Building it needs Tcl/Tk in the Python
+  used for the build (included in the python.org Windows installer).
 
 The whole `assets/` folder is bundled into the executable (`datas` in the
 spec). To change the logo, replace these files with the same names and

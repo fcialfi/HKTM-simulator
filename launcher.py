@@ -19,6 +19,32 @@ import webbrowser
 PORT = 8501
 URL = f"http://localhost:{PORT}"
 
+# Splash screen of the packaged executable (see hktm_simulator.spec). The
+# module only exists inside a PyInstaller build that has a splash screen;
+# running from source it is simply absent.
+try:
+    import pyi_splash  # type: ignore[import-not-found]
+except ImportError:
+    pyi_splash = None
+
+
+def _status(message: str) -> None:
+    """Progress message, both in the console window and on the splash screen."""
+    print(message, flush=True)
+    if pyi_splash is not None:
+        try:
+            pyi_splash.update_text(message)
+        except Exception:
+            pass
+
+
+def _close_splash() -> None:
+    if pyi_splash is not None:
+        try:
+            pyi_splash.close()
+        except Exception:
+            pass
+
 
 def _base_dir() -> str:
     """Directory to resolve app.py/ccsds_chain/.streamlit from: PyInstaller's
@@ -35,12 +61,13 @@ def _open_browser_when_ready():
     # error) or needlessly long.
     import urllib.request
 
-    for _ in range(100):  # up to ~20s
+    for _ in range(600):  # up to ~2 min on a slow first start
         try:
             urllib.request.urlopen(URL, timeout=0.5)
             break
         except Exception:
             time.sleep(0.2)
+    _close_splash()
     try:
         webbrowser.open(URL)
     except Exception:
@@ -50,6 +77,13 @@ def _open_browser_when_ready():
 
 
 def main():
+    print("=" * 64)
+    print("  HKTM CCSDS Signal Generator")
+    print("  Please wait: the first start can take a minute or two.")
+    print("  Your browser will open by itself when the GUI is ready.")
+    print("  Keep this window open - closing it stops the program.")
+    print("=" * 64, flush=True)
+    _status("Starting...")
     base_dir = _base_dir()
     app_path = os.path.join(base_dir, "app.py")
     if not os.path.exists(app_path):
@@ -82,9 +116,11 @@ def main():
         "--browser.gatherUsageStats=false",
     ]
 
-    threading.Thread(target=_open_browser_when_ready, daemon=True).start()
-
+    _status("Loading the GUI and signal-processing libraries...")
     from streamlit.web import cli as stcli
+
+    _status("Starting the GUI server...")
+    threading.Thread(target=_open_browser_when_ready, daemon=True).start()
 
     sys.argv = [
         "streamlit", "run", app_path,

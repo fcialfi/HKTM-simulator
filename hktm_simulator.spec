@@ -51,9 +51,26 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# Splash screen: shown by the bootloader as soon as the .exe is started,
+# i.e. *while* the one-file bundle (a few hundred MB) is being unpacked to a
+# temp folder, before any Python code can run or print. launcher.py updates
+# its status line and closes it once the GUI server answers.
+splash = Splash(
+    "assets/splash.png",
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=(40, 262),
+    text_size=10,
+    text_color="#8aa0bd",
+    minify_script=True,
+    always_on_top=False,
+)
+
 exe = EXE(
     pyz,
     a.scripts,
+    splash,
+    splash.binaries,
     a.binaries,
     a.datas,
     [],
