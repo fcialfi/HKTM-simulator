@@ -1,7 +1,7 @@
 # Packaging a standalone desktop executable
 
 `streamlit run app.py` is the normal, unpackaged way to run the GUI (see
-README.md) -- this document is only for building a single-file executable
+README.md) -- this document is only for building a standalone executable
 that runs the same GUI on a machine with no Python installed at all.
 
 **PyInstaller does not cross-compile.** A Windows `.exe` must be built by
@@ -28,34 +28,44 @@ executable from Linux or macOS.
    ```
 
    This takes a few minutes (PyInstaller has to trace every module numpy,
-   scipy, streamlit and plotly might import). When it finishes, the
-   executable is at:
+   scipy, streamlit and plotly might import). When it finishes, the program
+   is in the folder:
 
    ```
-   dist\HKTM-CCSDS-Signal-Generator.exe
+   dist\HKTM-CCSDS-Signal-Generator\
+       HKTM-CCSDS-Signal-Generator.exe
+       _internal\          (Python and all the libraries)
    ```
 
 4. Run it (double-click, or from a terminal):
 
    ```cmd
-   dist\HKTM-CCSDS-Signal-Generator.exe
+   dist\HKTM-CCSDS-Signal-Generator\HKTM-CCSDS-Signal-Generator.exe
    ```
 
-   A splash screen with the logo appears at once and shows the start-up
-   progress, and a console window opens (so you can see any error
-   messages). The first start can take a minute or two: the one-file
-   executable first unpacks its few hundred MB of libraries to a temporary
-   folder, and on Windows the antivirus usually scans them. When the GUI
-   server is up, the splash closes and your default browser opens
-   automatically to `http://localhost:8501`. If it doesn't open by itself, the console
+   A splash screen with the logo appears and a console window opens (so
+   you can see any error messages). The GUI server starts in a few seconds;
+   the splash then closes and your default browser opens automatically to
+   `http://localhost:8501`. If it doesn't open by itself, the console
    window prints that same address to open by hand. Closing the console
    window stops the server.
 
-5. To hand the tool to someone else, copy just that one `.exe` file --
-   it's fully self-contained (Python interpreter and all dependencies are
-   bundled inside it), so it doesn't need Python installed on the machine
-   that runs it. It's a few hundred MB, all numpy/scipy/streamlit/plotly
-   bundled in.
+5. To hand the tool to someone else, zip the whole
+   `dist\HKTM-CCSDS-Signal-Generator` folder (right-click > Send to >
+   Compressed folder). The receiver unzips it anywhere and starts the
+   `.exe` inside; the `.exe` must stay next to its `_internal` folder. No
+   Python install is needed on that machine. The folder is about 500 MB
+   (all of numpy/scipy/streamlit/plotly).
+
+### Folder or single file
+
+The spec builds a **folder** by default (`ONEFILE = False` at the bottom of
+`hktm_simulator.spec`), because it starts much faster: measured on Linux,
+the GUI server answers after about 1.3 s, against 5–17 s for the single
+file. A single-file `.exe` has to unpack all its libraries to a temporary
+folder at every start, and on Windows the antivirus scans them, which can
+take minutes. Set `ONEFILE = True` if you prefer one file to copy and
+accept the slow start.
 
 ## Logo and icon
 
@@ -78,7 +88,7 @@ rebuild. If they are missing, the app falls back to the 📡 icon and no logo.
 
 The executable can be restricted with a licence file that expires on a
 given date (`licensing.py`). A licence is a small `license.key` file, placed
-next to the `.exe`, with the customer name and the expiry date, signed with
+next to the `.exe` (inside the program folder), with the customer name and the expiry date, signed with
 a private key that only the issuer has. The executable contains only the
 public key: it can check a licence but cannot make one, and editing the file
 (e.g. a later date) invalidates it. Without a valid licence the program

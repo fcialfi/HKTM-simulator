@@ -79,7 +79,7 @@ def _open_browser_when_ready():
 def main():
     print("=" * 64)
     print("  HKTM CCSDS Signal Generator")
-    print("  Please wait: the first start can take a minute or two.")
+    print("  Please wait: starting takes a few seconds (longer the first time).")
     print("  Your browser will open by itself when the GUI is ready.")
     print("  Keep this window open - closing it stops the program.")
     print("=" * 64, flush=True)
