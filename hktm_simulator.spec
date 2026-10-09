@@ -19,6 +19,7 @@ datas = [
     ("analyze_recording.py", "."),
     ("ccsds_chain", "ccsds_chain"),
     (".streamlit", ".streamlit"),
+    ("assets", "assets"),
 ]
 binaries = []
 hiddenimports = []
@@ -62,4 +63,5 @@ exe = EXE(
     strip=False,
     upx=False,
     console=True,
+    icon="assets/exostaff_icon.ico",
 )

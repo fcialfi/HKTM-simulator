@@ -48,9 +48,16 @@ INPUT_FORMAT_OPTIONS = {
     "CADU as on air (already scrambled)": "cadu",
 }
 
+# Logo images, resolved next to this file so they are found both from source
+# and inside the packaged executable (PyInstaller bundles assets/, see
+# hktm_simulator.spec).
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+LOGO_PATH = os.path.join(ASSETS_DIR, "exostaff_logo.png")
+ICON_PATH = os.path.join(ASSETS_DIR, "exostaff_icon.png")
+
 st.set_page_config(
     page_title="HKTM CCSDS Signal Generator",
-    page_icon="📡",
+    page_icon=ICON_PATH if os.path.exists(ICON_PATH) else "📡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -154,6 +161,17 @@ div[data-testid="stExpander"] { background: rgba(255,255,255,0.02); border: 1px 
 # --------------------------------------------------------------------------
 # Sidebar controls
 # --------------------------------------------------------------------------
+if os.path.exists(LOGO_PATH):
+    # st.logo (Streamlit >= 1.35) places the logo at the top of the sidebar;
+    # older versions get a plain sidebar image instead.
+    if hasattr(st, "logo"):
+        try:
+            st.logo(LOGO_PATH, size="large", icon_image=ICON_PATH)
+        except TypeError:  # size= only exists from Streamlit 1.39
+            st.logo(LOGO_PATH, icon_image=ICON_PATH)
+    else:
+        st.sidebar.image(LOGO_PATH)
+
 with st.sidebar:
     st.caption("Signal generator settings, in the order the chain applies them.")
     with st.expander("1 · Modulation & symbol rate", expanded=True):
