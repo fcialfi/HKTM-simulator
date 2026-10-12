@@ -282,3 +282,23 @@ class TestPANonlinearity:
         soft = apply_pa_nonlinearity(r, backoff_db=0.0, smoothness=1.0)
         sharp = apply_pa_nonlinearity(r, backoff_db=0.0, smoothness=8.0)
         assert np.abs(sharp[0]) > np.abs(soft[0])
+
+
+class TestOutputFilterUnit:
+    def test_chunked_matches_single_call_and_unit_dc_gain(self):
+        from ccsds_chain.impairments import OutputFilter
+        rng = np.random.default_rng(5)
+        x = rng.normal(size=5000) + 1j * rng.normal(size=5000)
+        whole = OutputFilter(3, 2e6, 8e6).apply(x)
+        f = OutputFilter(3, 2e6, 8e6)
+        chunked = np.concatenate([f.apply(x[a:b]) for a, b in ((0, 7), (7, 1000), (1000, 1001), (1001, 5000))])
+        assert np.allclose(whole, chunked)
+        assert OutputFilter(3, 2e6, 8e6).taps.sum() == pytest.approx(1.0, abs=1e-3)
+
+    def test_minus_3_db_at_the_band_edge(self):
+        from ccsds_chain.impairments import OutputFilter
+        fs, bw = 8e6, 2e6
+        taps = OutputFilter(4, bw, fs).taps
+        h = np.abs(np.fft.fft(taps, 1 << 14))
+        f = np.fft.fftfreq(1 << 14, 1 / fs)
+        assert 20 * np.log10(h[np.argmin(np.abs(f - bw / 2))]) == pytest.approx(-3.01, abs=0.2)

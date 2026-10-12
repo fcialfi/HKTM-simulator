@@ -32,7 +32,8 @@ import os
 
 from ccsds_chain import rfcatcher
 from ccsds_chain.mapping import BITS_PER_SYMBOL
-from ccsds_chain.pipeline import ASM_FRAMED_INPUT_FORMATS, INPUT_FORMATS, ChainParams, export_chain
+from ccsds_chain.pipeline import (ASM_FRAMED_INPUT_FORMATS, INPUT_FORMATS, ChainParams, export_chain,
+                                  output_filter_bandwidth)
 from ccsds_chain.pulse_shaping import theoretical_bandwidth
 from ccsds_chain.utils import resample_ratio
 
@@ -191,6 +192,14 @@ def build_cli():
                     help="AM-PM conversion, in degrees of phase shift per dB of AM-AM "
                          "compression (the same figure real TWTA/SSPA datasheets quote); "
                          "0 (default) disables it; only used with --pa-backoff-db")
+    p.add_argument("--output-filter-order", type=int, default=0,
+                    help="Butterworth transmitter output filter after the PA, order 1-10 (0 = none, "
+                         "default). A low-order filter on an unfiltered NRZ signal (--pulse-shape nrz) "
+                         "lowers its sidelobes the way a real transmitter's output filter does: order 2 "
+                         "with the default bandwidth gives about -22/-35/-42 dB, close to AWS")
+    p.add_argument("--output-filter-bw-hz", type=float, default=None,
+                    help="RF -3 dB bandwidth of the output filter, two-sided, in Hz; default 1.9 x "
+                         "symbol rate; only used with --output-filter-order")
     p.add_argument("--dtype", choices=["float32", "int16"], default=OUTPUT_DTYPE,
                     help="IQ sample format for the output file; int16 is the RF-Catcher "
                          "format (little-endian, 12 significant bits, range [-2048, 2047])")
@@ -276,6 +285,8 @@ def main():
         pa_backoff_db=args.pa_backoff_db,
         pa_smoothness=args.pa_smoothness,
         pa_am_pm_deg_per_db=args.pa_am_pm_deg_per_db,
+        output_filter_order=args.output_filter_order,
+        output_filter_bw_hz=args.output_filter_bw_hz,
         doppler_hz=args.doppler_hz,
         doppler_rate_hz_s=args.doppler_rate_hz_s,
     )
@@ -333,6 +344,9 @@ def main():
         if params.pa_am_pm_deg_per_db != 0:
             pa_desc += f", AM-PM {params.pa_am_pm_deg_per_db:.1f} deg/dB"
         impairments.append(pa_desc)
+    if params.output_filter_order > 0:
+        impairments.append(f"Butterworth output filter, order {params.output_filter_order}, "
+                           f"{output_filter_bandwidth(params) / 1e6:.3f} MHz at -3 dB")
     if impairments:
         print(f"       -> transmitter impairments: {', '.join(impairments)}")
     if params.doppler_hz != 0 or params.doppler_rate_hz_s != 0:

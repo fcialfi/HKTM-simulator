@@ -10,10 +10,13 @@ the chain:
   and phase noise (PhaseNoiseGenerator).
 - IQ modulator: gain/phase imbalance (apply_iq_imbalance).
 - Power amplifier: saturation/compression and AM-PM conversion
-  (apply_pa_nonlinearity) -- the last physical stage before the antenna.
+  (apply_pa_nonlinearity).
+- Output filter: an optional Butterworth band-pass after the PA
+  (OutputFilter), the last physical stage before the antenna -- what lowers
+  the sidelobes of a transmitter that does no pulse shaping.
 
 Applied (see pipeline._apply_impairments()) in that order: frequency
-offset -> phase noise -> IQ imbalance -> PA nonlinearity last, matching
+offset -> phase noise -> IQ imbalance -> PA nonlinearity -> output filter, matching
 where each originates along the real signal path. This chain's 0 Hz *is*
 the transmitter's intended RF center frequency (there is no separate
 software upconversion stage), and apply_iq_imbalance()'s mirror-image term
@@ -35,6 +38,7 @@ non-ideality has already acted on it.
 """
 
 import numpy as np
+from scipy import signal
 
 
 def apply_iq_imbalance(iq: np.ndarray, gain_imbalance_db: float, phase_imbalance_deg: float) -> np.ndarray:
@@ -132,6 +136,62 @@ class PhaseNoiseGenerator:
         phase = self._phase + np.cumsum(increments)
         self._phase = phase[-1]
         return iq * np.exp(1j * phase)
+
+
+class OutputFilter:
+    """Butterworth transmitter output filter, stateful across IQ chunks.
+
+    At complex baseband, where 0 Hz is the RF center frequency, a low-pass
+    with cutoff `bandwidth_hz / 2` is the RF band-pass of -3 dB bandwidth
+    `bandwidth_hz` centered on the carrier. The taps are the impulse
+    response of the *analog* Butterworth filter (its exact complex response,
+    magnitude and phase, sampled up to +/- sample_rate/2), tapered by a
+    half-Hann window over a length of about 40 x order filter time
+    constants, so the attenuation matches the analog filter within about
+    1 dB up to 0.45 x sample_rate for order >= 2 (a few dB near Nyquist for
+    order 1, whose 1/f skirt is the hardest to truncate) -- unlike a
+    bilinear-transform IIR, which adds tens of dB of extra attenuation near
+    the Nyquist frequency. The filter state is carried across `apply()`
+    calls, so filtering a sequence of chunks gives the same output as
+    filtering their concatenation once -- the same cross-batch contract as
+    `PhaseNoiseGenerator`.
+
+    Like a real analog filter it is causal: it adds group delay and some
+    inter-symbol interference, visible in the constellation.
+    """
+
+    MAX_ORDER = 10
+    _NFFT = 1 << 15
+    _MAX_TAPS = 4096
+
+    def __init__(self, order: int, bandwidth_hz: float, sample_rate: float):
+        if not 1 <= order <= self.MAX_ORDER:
+            raise ValueError(f"output filter order must be 1-{self.MAX_ORDER}, got {order}")
+        if not 0 < bandwidth_hz / 2 < 0.49 * sample_rate:
+            raise ValueError(
+                f"output filter bandwidth {bandwidth_hz / 1e6:.3f} MHz must be positive and below the "
+                f"sample rate ({sample_rate / 1e6:.3f} MS/s): raise samples/symbol or lower the bandwidth")
+        _, poles, gain = signal.buttap(order)  # analog prototype, cutoff 1 rad/s
+        s_norm = 1j * np.fft.fftfreq(self._NFFT, 1 / sample_rate) / (bandwidth_hz / 2)
+        response = gain / np.prod(s_norm[:, None] - poles[None, :], axis=1)
+        h = np.fft.ifft(response).real
+        time_constant = sample_rate / (2 * np.pi * bandwidth_hz / 2)  # samples
+        n_taps = int(min(self._MAX_TAPS, max(64, 40 * order * time_constant)))
+        self.taps = h[:n_taps] * np.hanning(2 * n_taps)[n_taps:]
+        self.taps /= self.taps.sum()  # unit gain at the carrier, as the analog filter
+        self._zi = np.zeros(n_taps - 1, dtype=complex)
+
+    @property
+    def group_delay_samples(self) -> int:
+        """Group delay at the carrier, rounded to whole samples: where a
+        receiver's symbol timing recovery would move its sampling instant."""
+        return int(round(np.sum(np.arange(len(self.taps)) * self.taps) / np.sum(self.taps)))
+
+    def apply(self, iq: np.ndarray) -> np.ndarray:
+        if len(iq) == 0:
+            return iq
+        out, self._zi = signal.lfilter(self.taps, 1.0, iq, zi=self._zi)
+        return out
 
 
 def apply_pa_nonlinearity(iq: np.ndarray, backoff_db: float, smoothness: float, am_pm_deg_per_db: float = 0.0) -> np.ndarray:

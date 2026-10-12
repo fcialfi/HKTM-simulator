@@ -600,14 +600,16 @@ class TestExportChainMatchesRunChain:
     carried across batches -- not just the (trivial) single-batch case a
     small n_cadu would otherwise hit by default."""
 
-    @pytest.mark.parametrize("modulation,conv_rate,pulse_shape", [
-        ("QPSK", "1/2", "rrc"), ("BPSK", "1/2", "rrc"), ("QPSK", "3/4", "rrc"), ("QPSK", "1/2", "nrz"),
+    @pytest.mark.parametrize("modulation,conv_rate,pulse_shape,output_filter_order", [
+        ("QPSK", "1/2", "rrc", 0), ("BPSK", "1/2", "rrc", 0), ("QPSK", "3/4", "rrc", 0), ("QPSK", "1/2", "nrz", 0),
+        ("QPSK", "1/2", "nrz", 2),
     ])
     def test_forced_tiny_batches_match_whole_array_run(self, tmp_path, monkeypatch, modulation, conv_rate,
-                                                       pulse_shape):
+                                                       pulse_shape, output_filter_order):
         monkeypatch.setattr(pipeline, "_EXPORT_BATCH_TARGET_BYTES", 1)  # forces batch_n_cadu == 1
 
-        p = _small_params(n_cadu=6, modulation=modulation, conv_rate=conv_rate, pulse_shape=pulse_shape)
+        p = _small_params(n_cadu=6, modulation=modulation, conv_rate=conv_rate, pulse_shape=pulse_shape,
+                          output_filter_order=output_filter_order)
         expected = pack_iq_interleaved(normalize_peak(run_chain(p).iq, peak=0.9), "int16")
 
         out_path = tmp_path / "out.raw"
@@ -670,3 +672,48 @@ class TestNrzPulseShape:
     def test_unknown_pulse_shape_is_rejected(self):
         with pytest.raises(NotImplementedError):
             run_chain(_small_params(n_cadu=1, pulse_shape="gaussian"))
+
+
+class TestOutputFilter:
+    """Optional Butterworth output filter after the PA."""
+
+    @staticmethod
+    def _psd_db(p):
+        iq = run_chain(p).iq
+        nfft = 4096
+        segs = iq[:len(iq) // nfft * nfft].reshape(-1, nfft) * np.hanning(nfft)
+        psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(segs, axis=1)) ** 2, axis=0))
+        f = np.fft.fftshift(np.fft.fftfreq(nfft, 1 / (p.symbol_rate * p.sps)))
+        db = 10 * np.log10(psd / psd.max())
+        return lambda x: db[np.argmin(np.abs(f - x))]
+
+    def test_lowers_the_nrz_sidelobes_like_the_analog_filter(self):
+        rs = 1_785_000
+        plain = self._psd_db(_small_params(n_cadu=4, pulse_shape="nrz", sps=8))
+        filt = self._psd_db(_small_params(n_cadu=4, pulse_shape="nrz", sps=8, output_filter_order=2))
+        fc = 1.9 * rs / 2
+        for x in (1.43 * rs, 2.46 * rs):
+            analog_att = 10 * np.log10(1 + (x / fc) ** 4)        # 2nd-order Butterworth
+            assert plain(x) - filt(x) == pytest.approx(analog_att, abs=1.5)
+        assert abs(plain(0.3 * rs) - filt(0.3 * rs)) < 0.5        # passband untouched
+
+    def test_disabled_by_default_and_recorded_in_meta(self):
+        assert run_chain(_small_params(n_cadu=1)).meta["output_filter_order"] is None
+        meta = run_chain(_small_params(n_cadu=1, output_filter_order=3, output_filter_bw_hz=2e6)).meta
+        assert meta["output_filter_order"] == 3 and meta["output_filter_bw_hz"] == 2e6
+
+    @pytest.mark.parametrize("order,bw", [(11, None), (-1, None), (2, 50e6), (2, -1.0)])
+    def test_invalid_settings_are_rejected(self, order, bw):
+        with pytest.raises(ValueError):
+            run_chain(_small_params(n_cadu=1, output_filter_order=order, output_filter_bw_hz=bw))
+
+    def test_constellation_after_delay_compensation_keeps_only_small_isi(self):
+        from ccsds_chain.pipeline import output_filter_delay
+        from ccsds_chain.pulse_shaping import matched_filter_sample, nrz_taps
+        p = _small_params(n_cadu=2, pulse_shape="nrz", sps=8, output_filter_order=2)
+        r = run_chain(p)
+        d = matched_filter_sample(r.iq[output_filter_delay(p):], len(r.symbols) - 2, p.sps, nrz_taps(p.sps))
+        s = r.symbols[:len(d)]
+        d = d / np.mean(np.abs(d)) * np.mean(np.abs(s))
+        evm = np.sqrt(np.mean(np.abs(d[50:-50] - s[50:-50]) ** 2) / np.mean(np.abs(s) ** 2))
+        assert output_filter_delay(p) > 0 and evm < 0.10

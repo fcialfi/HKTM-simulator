@@ -21,7 +21,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ccsds_chain.mapping import BITS_PER_SYMBOL
-from ccsds_chain.pipeline import ASM, ASM_FRAMED_INPUT_FORMATS, ChainParams, export_chain, run_chain
+from ccsds_chain.pipeline import (ASM, ASM_FRAMED_INPUT_FORMATS, ChainParams, export_chain, output_filter_delay,
+                                  run_chain)
 from ccsds_chain.pulse_shaping import matched_filter_sample, pulse_taps, theoretical_bandwidth
 from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
@@ -620,6 +621,28 @@ with st.sidebar:
                 "symbol rate x (1 + alpha)) without aliasing."
             ),
         )
+        enable_output_filter = st.checkbox(
+            "Butterworth output filter", key="enable_output_filter",
+            help=(
+                "Transmitter output filter (band-pass at RF, centred on the carrier), applied after "
+                "the power amplifier. With no pulse shaping it lowers the NRZ sidelobes the way a real "
+                "transmitter's output filter does: order 2 with bandwidth 1.9 x symbol rate gives about "
+                "-22/-35/-42 dB, close to what was measured on AWS. It adds group delay and a little "
+                "inter-symbol interference, visible in the constellation."
+            ),
+        )
+        output_filter_order = 0
+        output_filter_bw_hz = None
+        if enable_output_filter:
+            of_col1, of_col2 = st.columns(2)
+            output_filter_order = of_col1.number_input("Order", min_value=1, max_value=10, value=2, step=1,
+                                                       key="output_filter_order")
+            output_filter_bw_hz = 1e6 * of_col2.number_input(
+                "-3 dB BW (MHz)", min_value=0.01, value=round(1.9 * symbol_rate / 1e6, 3), step=0.1,
+                format="%.3f", key="output_filter_bw_mhz",
+                help="Two-sided RF bandwidth at -3 dB. Default 1.9 x symbol rate.")
+            if output_filter_bw_hz / 2 >= 0.49 * symbol_rate * sps:
+                st.warning("Bandwidth too wide for the sample rate: raise samples/symbol or lower it.")
 
     with st.expander("7 · Impairments & Doppler", expanded=bool(st.session_state.get("enable_impairments")
                                                                                or st.session_state.get("enable_doppler"))):
@@ -792,6 +815,8 @@ params = ChainParams(
     pa_backoff_db=float(pa_backoff_db) if enable_pa else None,
     pa_smoothness=float(pa_smoothness),
     pa_am_pm_deg_per_db=float(pa_am_pm_deg_per_db),
+    output_filter_order=int(output_filter_order),
+    output_filter_bw_hz=output_filter_bw_hz,
     doppler_hz=float(doppler_hz),
     doppler_rate_hz_s=float(doppler_rate_hz_s),
 )
@@ -1070,6 +1095,8 @@ with tab_gen:
             chip(f"RRC &alpha;={rrc_alpha:.2f}" if pulse_shape == "rrc" else "NO FILTER", pulse_shape == "rrc"),
             chip("TX IMPAIR", freq_offset_hz != 0 or iq_gain_imbalance_db != 0
                  or iq_phase_imbalance_deg != 0 or phase_noise_linewidth_hz > 0 or enable_pa),
+            chip(f"BUTTERWORTH N={output_filter_order}" if output_filter_order else "OUT FILTER",
+                 output_filter_order > 0),
             chip("DOPPLER", doppler_hz != 0 or doppler_rate_hz_s != 0),
         ]) + '</div>'
         st.markdown(stages_html, unsafe_allow_html=True)
@@ -1181,8 +1208,11 @@ with tab_gen:
             # pulse shaping/impairments are ever applied, so plotting them would
             # always show a perfect constellation regardless of any Transmitter
             # Impairments setting. See pulse_shaping.matched_filter_sample().
+            # The output filter's group delay is removed first, as a receiver's
+            # symbol timing recovery would: what remains is its real ISI.
             decision_points = matched_filter_sample(
-                result.iq, len(result.symbols), int(sps), pulse_taps(pulse_shape, rrc_alpha, rrc_span, int(sps)),
+                result.iq[output_filter_delay(params):], len(result.symbols), int(sps),
+                pulse_taps(pulse_shape, rrc_alpha, rrc_span, int(sps)),
             )
             n_preview = min(3000, len(decision_points))
             idx = np.linspace(0, len(decision_points) - 1, n_preview).astype(int)
@@ -1394,6 +1424,9 @@ with tab_gen:
             params.rrc_span, params.sps, params.symbol_rate, params.seed, payload_mode,
             output_dtype, output_peak, resample_enabled, target_fs if resample_enabled else None,
             export_rfcatcher, rf_frequency_hz, rf_bandwidth_hz,
+            params.freq_offset_hz, params.iq_gain_imbalance_db, params.iq_phase_imbalance_deg,
+            params.phase_noise_linewidth_hz, params.pa_backoff_db, params.pa_smoothness, params.pa_am_pm_deg_per_db,
+            params.output_filter_order, params.output_filter_bw_hz, params.doppler_hz, params.doppler_rate_hz_s,
         )
         if generate_clicked:
             export_params = dataclasses.replace(params, n_cadu=int(export_n_cadu))

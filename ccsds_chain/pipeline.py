@@ -16,7 +16,7 @@ from .mapping import BITS_PER_SYMBOL, bits_to_nrzl, map_symbols
 from .pulse_shaping import PULSE_SHAPES, pulse_shape, pulse_taps, RRCPulseShaper
 from .transfer_frame import PRIMARY_HEADER_BYTES, build_primary_header, vcid_schedule_counts
 from .impairments import (apply_doppler, apply_frequency_offset, apply_iq_imbalance,
-                           apply_pa_nonlinearity, PhaseNoiseGenerator)
+                           apply_pa_nonlinearity, OutputFilter, PhaseNoiseGenerator)
 from .utils import (bytes_to_bits, find_all_cadu_positions, find_cadu_sync, generate_payload,
                      pack_iq_interleaved, resample_iq)
 
@@ -48,6 +48,12 @@ class ChainParams:
     symbol_rate: int = 1_785_000
     sps: int = 4
     pulse_shape: str = "rrc"  # "rrc" (rrc_alpha, rrc_span) or "nrz" (rectangular pulses, no filter)
+    output_filter_order: int = 0  # 0 = disabled. Butterworth transmitter output filter after the PA
+                                  # (impairments.OutputFilter), order 1-10 -- e.g. to model a
+                                  # transmitter without pulse shaping whose output filter lowers
+                                  # the NRZ sidelobes.
+    output_filter_bw_hz: Optional[float] = None  # its RF -3 dB bandwidth (two-sided, Hz);
+                                                 # None = 1.9 x symbol_rate
     rrc_alpha: float = 0.35
     rrc_span: int = 8
     rs_e: int = 16  # error-correction capability, in symbols: 8 or 16 (12.5)
@@ -229,6 +235,10 @@ def _validate_chain_params(p: ChainParams) -> None:
         raise NotImplementedError(f"encoding {p.encoding!r} not implemented (baseline: NRZ-L)")
     if p.pulse_shape not in PULSE_SHAPES:
         raise NotImplementedError(f"pulse_shape {p.pulse_shape!r} not implemented (expected one of {PULSE_SHAPES})")
+    if p.output_filter_order < 0:
+        raise ValueError(f"output_filter_order must be 0 (disabled) or 1-{OutputFilter.MAX_ORDER}")
+    if p.output_filter_order > 0:
+        _make_output_filter(p, p.symbol_rate * p.sps)  # raises ValueError on a bad order/bandwidth
     if p.input_format not in INPUT_FORMATS:
         raise NotImplementedError(f"input_format {p.input_format!r} not implemented (expected one of {INPUT_FORMATS})")
     if p.input_format == "asm_frame" and p.randomizer == "none":
@@ -562,20 +572,44 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "pa_backoff_db": p.pa_backoff_db,
         "pa_smoothness": p.pa_smoothness if p.pa_backoff_db is not None else None,
         "pa_am_pm_deg_per_db": p.pa_am_pm_deg_per_db if p.pa_backoff_db is not None else None,
+        "output_filter_order": p.output_filter_order if p.output_filter_order > 0 else None,
+        "output_filter_bw_hz": output_filter_bandwidth(p) if p.output_filter_order > 0 else None,
         "doppler_hz": p.doppler_hz if p.doppler_hz != 0 else None,
         "doppler_rate_hz_s": p.doppler_rate_hz_s if p.doppler_rate_hz_s != 0 else None,
     }
 
 
+def output_filter_bandwidth(p: ChainParams) -> float:
+    """RF -3 dB bandwidth of the output filter: the set value, or by default
+    1.9 x symbol rate (a 2nd-order filter of that width reproduces the
+    sidelobes measured on AWS, about -21/-34/-45 dB)."""
+    return p.output_filter_bw_hz if p.output_filter_bw_hz is not None else 1.9 * p.symbol_rate
+
+
+def output_filter_delay(p: ChainParams) -> int:
+    """Group delay of the output filter in native samples (0 when disabled),
+    for re-timing the receive-side view (GUI constellation)."""
+    f = _make_output_filter(p, p.symbol_rate * p.sps)
+    return f.group_delay_samples if f is not None else 0
+
+
+def _make_output_filter(p: ChainParams, sample_rate: float) -> Optional[OutputFilter]:
+    if p.output_filter_order <= 0:
+        return None
+    return OutputFilter(p.output_filter_order, output_filter_bandwidth(p), sample_rate)
+
+
 def _apply_impairments(
     iq: np.ndarray, p: ChainParams, sample_rate: float, start_sample: int,
     phase_noise_gen: Optional[PhaseNoiseGenerator],
+    output_filter: Optional[OutputFilter] = None,
 ) -> np.ndarray:
     """Applies ChainParams' transmitter impairments, then its channel
     Doppler, to a chunk of pulse-shaped IQ, in the order they originate
     along the real signal path: LO frequency offset and phase noise, then
-    IQ modulator gain/phase imbalance, then PA nonlinearity (the final
-    transmitter-side stage, before the antenna), then Doppler last of all
+    IQ modulator gain/phase imbalance, then PA nonlinearity, then the
+    output filter (the final transmitter-side stage, before the antenna;
+    stateful like `phase_noise_gen`), then Doppler last of all
     -- imparted by the channel itself, after the signal has left the
     antenna, so it acts on whatever the transmitter chain already produced
     rather than the other way around. Skips a stage entirely when its
@@ -612,6 +646,8 @@ def _apply_impairments(
         iq = apply_iq_imbalance(iq, p.iq_gain_imbalance_db, p.iq_phase_imbalance_deg)
     if p.pa_backoff_db is not None:
         iq = apply_pa_nonlinearity(iq, p.pa_backoff_db, p.pa_smoothness, p.pa_am_pm_deg_per_db)
+    if output_filter is not None:
+        iq = output_filter.apply(iq)
     if p.doppler_hz != 0 or p.doppler_rate_hz_s != 0:
         iq = apply_doppler(iq, p.doppler_hz, p.doppler_rate_hz_s, sample_rate, start_sample=start_sample)
     return iq
@@ -675,7 +711,8 @@ def run_chain(
         PhaseNoiseGenerator(p.phase_noise_linewidth_hz, sample_rate, p.impairment_seed)
         if p.phase_noise_linewidth_hz > 0 else None
     )
-    iq = _apply_impairments(iq, p, sample_rate, start_sample=0, phase_noise_gen=phase_noise_gen)
+    iq = _apply_impairments(iq, p, sample_rate, start_sample=0, phase_noise_gen=phase_noise_gen,
+                            output_filter=_make_output_filter(p, sample_rate))
 
     if progress_callback is not None:
         progress_callback(1.0, "Done")
@@ -812,6 +849,7 @@ def export_chain(
             PhaseNoiseGenerator(p.phase_noise_linewidth_hz, sample_rate, p.impairment_seed)
             if p.phase_noise_linewidth_hz > 0 else None
         )
+        output_filter = _make_output_filter(p, sample_rate)
         bits_per_symbol = BITS_PER_SYMBOL[p.modulation]
         # Leftover coded bits, when a batch's coded-bit count isn't a whole
         # number of symbols (possible with a punctured rate), carried into
@@ -839,7 +877,8 @@ def export_chain(
                 symbols = map_symbols(bits_to_nrzl(coded), p.modulation)
                 n_symbols += len(symbols)
                 iq_batch = shaper.shape(symbols)
-                iq_batch = _apply_impairments(iq_batch, p, sample_rate, n_native_samples, phase_noise_gen)
+                iq_batch = _apply_impairments(iq_batch, p, sample_rate, n_native_samples, phase_noise_gen,
+                                              output_filter)
                 if len(iq_batch):
                     global_peak = max(global_peak, np.abs(iq_batch.real).max(), np.abs(iq_batch.imag).max())
                     n_native_samples += len(iq_batch)
@@ -852,7 +891,7 @@ def export_chain(
                     )
 
             tail = shaper.flush()
-            tail = _apply_impairments(tail, p, sample_rate, n_native_samples, phase_noise_gen)
+            tail = _apply_impairments(tail, p, sample_rate, n_native_samples, phase_noise_gen, output_filter)
             if len(tail):
                 global_peak = max(global_peak, np.abs(tail.real).max(), np.abs(tail.imag).max())
                 n_native_samples += len(tail)
