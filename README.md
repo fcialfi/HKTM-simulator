@@ -4,22 +4,38 @@ Test RF signal generator, modulated per the CCSDS chain (baseline QPSK), to
 be injected via the **RF-Catcher (TestTree) Capture & Playback Application**.
 
 References: CCSDS 131.0-B-5 (TM Synchronization and Channel Coding, Sept. 2023),
+CCSDS 132.0-B-3 (TM Space Data Link Protocol, primary header only),
 ECSS-E-ST-50-01C.
+
+A complete **user manual (PDF)** is in
+[`docs/HKTM_Simulator_User_Manual.pdf`](docs/HKTM_Simulator_User_Manual.pdf):
+installation, GUI walkthrough with screenshots, CLI reference, test
+scenarios, output formats and licensing. It is built from
+`docs/manual/build_manual.py` (see [Building the manual](#building-the-manual)).
 
 ## Project structure
 
 ```
-app.py                  GUI (Streamlit) with real-time spectrum/constellation
-generate_signal.py      CLI, generates output_iq.raw + metadata
+app.py                  GUI (Streamlit): signal generator + recording analysis tabs
+generate_signal.py      CLI, generates the IQ file (raw or .rfcatcher) + metadata
 verify_spectrum.py      CLI, checks the occupied bandwidth of an existing IQ file
 analyze_recording.py    CLI, analyzes a real recorded downlink (.rfcatcher or raw IQ)
+launcher.py             entry point of the packaged executable (splash, licence, server)
+licensing.py            time-limited licence check of the packaged executable
+license_tool.py         issuer-side tool: key pair, licence files (not shipped)
+hktm_simulator.spec     PyInstaller build recipe (see PACKAGING.md)
+assets/                 logo, icon, splash image (bundled into the executable)
+docs/                   user manual (PDF) and its build script
 ccsds_chain/
   pipeline.py            chain orchestration (used by app.py and generate_signal.py)
+  transfer_frame.py       synthetic TM primary header (SCID, VCID, frame counts)
   reed_solomon.py         RS(255,223)/(255,239), CCSDS-native GF(256) and dual-basis
   convolutional.py        convolutional K=7, rate 1/2 punctured to 2/3-7/8
   scrambler.py             CCSDS pseudo-randomizer (131071-bit and 255-bit legacy)
   mapping.py               NRZ-L + QPSK Gray / BPSK
   pulse_shaping.py         RRC filter
+  impairments.py           transmitter impairments (LO, IQ, PA) and channel Doppler
+  rfcatcher.py             RF-Catcher .rfcatcher recording format (read/write)
   spectrum.py              PSD/occupied bandwidth (used by app.py and verify_spectrum.py)
   utils.py                 bit/byte helpers, IQ file I/O
   viterbi.py               Viterbi decoder for the K=7 convolutional code (self-verification)
@@ -36,12 +52,14 @@ ccsds_chain/
 | Encoding        | NRZ-L                      | yes (only NRZ-L implemented) |
 | RS FEC          | RS(255,223), interleave depth 5 | yes (on/off; E=8 or 16; I=1,2,3,4,5,8) |
 | Convolutional FEC | rate 1/2, K=7, G1=171o, G2=133o | yes (on/off; rate 1/2, 2/3, 3/4, 5/6, 7/8; invert G2 only at rate 1/2) |
+| Pulse shaping   | RRC, alpha 0.35, span 8 symbols, 4 samples/symbol | yes (`--alpha`, `--span`, `--sps`) |
 | Pseudo-randomizer | none                  | yes (none / 255-bit legacy / 131071-bit, standard default since 2023) |
 | CADU            | 4-byte ASM (0x1ACFFC1D, uncoded) + 1275-byte RS-encoded = 1279 bytes | depends on I (CADU = 4 + 255*I bytes) |
+| Spacecraft ID   | 0x123 (291), 10 bits | yes (`--spacecraft-id`, 0-1023; written only with `--vcid-list`) |
 
 ## Implemented chain
 
-Follows the official CCSDS 131.0-B-3 structure ("Overall Structure of Channel
+Follows the official CCSDS 131.0-B-5 structure ("Overall Structure of Channel
 Coding"): RS encode -> pseudo-random -> attach ASM (= CADU) -> convolutional
 over the CADU stream:
 
@@ -294,17 +312,36 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Opens a graphical interface (dark theme) with all chain parameters in the
-sidebar. **Every parameter change recomputes the chain and updates in real
+Opens a graphical interface (dark theme) with two tabs: **Signal
+generator** and **Recording analysis** (see "Analyzing a real recording"
+below). The generator's chain parameters are in the sidebar, grouped in the
+order the chain applies them (1 Modulation & symbol rate, 2 Input format,
+3 Channel coding, 4 Payload & duration, 5 Deterministic error injection,
+6 Pulse shaping, 7 Impairments & Doppler). **Every parameter change recomputes the chain and updates in real
 time**: spectrum (PSD with the -3dB/null-to-null bandwidth highlighted),
 constellation, I/Q excerpt over time, and metrics (occupied bandwidth,
 signal duration, compute time). Includes a visual indicator of active/
 inactive pipeline stages and direct export of the IQ file + metadata from
 the browser ("Download" buttons).
 
+In the packaged executable the sidebar also shows the licence holder and
+expiry date (with a warning in the last 30 days).
+
 `app.py` and `generate_signal.py` share the same chain implementation
 (`ccsds_chain/pipeline.py`): there is no risk of the GUI and CLI drifting
 apart.
+
+### Standalone executable (Windows)
+
+The GUI can be packaged as a folder with an `.exe` that needs no Python
+install (build steps in [PACKAGING.md](PACKAGING.md)). The user unzips the
+folder, puts the `license.key` file received from the issuer next to the
+`.exe`, and starts the `.exe`: a splash screen shows the start-up progress,
+then the GUI opens in the default browser at `http://localhost:8501`.
+Closing the console window stops the program. Without a valid licence
+(missing, altered, expired, or system clock set back) the program prints
+the reason and stops; builds made without a public key have no licence
+check.
 
 ### CLI
 
@@ -317,7 +354,9 @@ python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # for an R
 python generate_signal.py --rfcatcher --target-fs 10e6 --rf-frequency-mhz 1707   # RF-Catcher recording
 
 # 3 Virtual Channels, VC 0 getting twice VC 1/2's share of frames -- for
-# validating a receiver's VC identification/routing
+# validating a receiver's VC identification/routing. The Spacecraft ID
+# (10 bits, 0-1023, default 0x123 = 291) goes into the same synthetic
+# primary header, so it has an effect only together with --vcid-list
 python generate_signal.py --vcid-list 0,0,1,2 --spacecraft-id 291 -o test4.raw
 
 # Exactly E=16 symbol errors in codeword 0 of CADU #10: must still decode
@@ -465,8 +504,9 @@ running the decoder for real, against real injected errors, can show.
 
 ## TODO
 
-- [ ] Confirm the IQ Converter's expected input format (contact
-      support@test-tree.com if needed)
+- [ ] Confirm on the instrument that RF-Catcher plays back a generated
+      `.rfcatcher` file as is (headers and metadata match a real recording,
+      but playback has not been tried yet)
 - [ ] Verify the expected NRZ-L polarity
 - [ ] Implement Turbo coding and LDPC (CCSDS 131.0-B-5 sections 6-8), if
       required by a specific receiver/test
@@ -486,3 +526,18 @@ parameters (Rs=1.785 MS/s, alpha=0.35), the expected -3dB occupied
 bandwidth is close to Rs (~1.7-1.8 MHz), and the null-to-null bandwidth
 close to Rs*(1+alpha) (~2.3-2.4 MHz, the exact theoretical value for an
 ideal RRC filter).
+
+## Building the manual
+
+The PDF user manual is generated, not hand-edited: text and screenshots
+are in `docs/manual/`, and the CLI option tables in its appendix are read
+from the scripts' own argument parsers, so they cannot drift from the code.
+After a change, rebuild it with:
+
+```bash
+pip install reportlab
+python docs/manual/build_manual.py      # writes docs/HKTM_Simulator_User_Manual.pdf
+```
+
+Screenshots (`docs/manual/img/`) are not regenerated automatically: retake
+them by hand if the GUI layout changes.
