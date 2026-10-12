@@ -22,7 +22,7 @@ import streamlit as st
 
 from ccsds_chain.mapping import BITS_PER_SYMBOL
 from ccsds_chain.pipeline import ASM, ASM_FRAMED_INPUT_FORMATS, ChainParams, export_chain, run_chain
-from ccsds_chain.pulse_shaping import matched_filter_sample, rrc_taps
+from ccsds_chain.pulse_shaping import matched_filter_sample, pulse_taps, theoretical_bandwidth
 from ccsds_chain.spectrum import welch_psd
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
 from analyze_recording import analyze, report_lines
@@ -569,10 +569,28 @@ with st.sidebar:
                     corrupt_vc = st.number_input("Virtual Channel ID", min_value=0, max_value=7, value=vcid_list[0], step=1)
                     st.caption(f"Corrupting {corrupt_rs_symbols} symbol(s) in codeword {corrupt_codeword_index} of every VC{corrupt_vc} CADU")
 
-    with st.expander("6 · Pulse shaping (RRC)", expanded=False):
-        st.caption(f"Shapes the {modulation} symbols into a band-limited waveform (Root-Raised-Cosine filter) before D/A conversion.")
+    with st.expander("6 · Pulse shaping", expanded=False):
+        pulse_shape_label = st.radio(
+            "Pulse shape", ["RRC filter", "None (NRZ, rectangular)"], horizontal=True,
+            help=(
+                "RRC filter: Root-Raised-Cosine shaping, band-limited spectrum ending at "
+                "symbol rate x (1 + alpha) / 2 each side. None: rectangular pulses one "
+                "symbol long, as from a transmitter without pulse shaping (often followed "
+                "only by an output band-pass filter): sinc^2 spectrum with first nulls at "
+                "+/- symbol rate and sidelobes decaying as 1/f^2. Its main lobe is as wide "
+                "as an RRC with alpha = 1, but the sidelobes continue beyond it."
+            ),
+        )
+        pulse_shape = "nrz" if pulse_shape_label.startswith("None") else "rrc"
+        if pulse_shape == "nrz":
+            st.caption(f"The {modulation} symbols are held for one symbol period each: no filter. "
+                       "Sidelobes above sample rate / 2 fold back into the band: 8 samples/symbol "
+                       "gives a cleaner spectrum.")
+        else:
+            st.caption(f"Shapes the {modulation} symbols into a band-limited waveform (Root-Raised-Cosine "
+                       "filter) before D/A conversion.")
         rrc_alpha = st.slider(
-            "Roll-off (alpha)", 0.05, 1.00, 0.35, 0.01,
+            "Roll-off (alpha)", 0.05, 1.00, 0.35, 0.01, disabled=pulse_shape == "nrz",
             help=(
                 "Excess-bandwidth factor of the RRC filter (0-1). Trades occupied "
                 "bandwidth against tolerance to timing/synchronization error: lower "
@@ -584,7 +602,7 @@ with st.sidebar:
             ),
         )
         rrc_span = st.slider(
-            "Span (symbols)", 4, 16, 8, 1,
+            "Span (symbols)", 4, 16, 8, 1, disabled=pulse_shape == "nrz",
             help=(
                 "Length of the RRC filter's impulse response, in symbol periods. A "
                 "longer span approximates the ideal (infinite) RRC filter more "
@@ -745,6 +763,7 @@ params = ChainParams(
     bit_rate=int(bit_rate),
     symbol_rate=int(symbol_rate),
     sps=int(sps),
+    pulse_shape=pulse_shape,
     rrc_alpha=float(rrc_alpha),
     rrc_span=int(rrc_span),
     rs_e=int(rs_e),
@@ -1048,7 +1067,7 @@ with tab_gen:
             chip(f"CONV K=7 r={conv_rate}", fec_conv),
             chip("NRZ-L", True),
             chip(f"{modulation} GRAY" if modulation == "QPSK" else modulation, True),
-            chip(f"RRC &alpha;={rrc_alpha:.2f}", True),
+            chip(f"RRC &alpha;={rrc_alpha:.2f}" if pulse_shape == "rrc" else "NO FILTER", pulse_shape == "rrc"),
             chip("TX IMPAIR", freq_offset_hz != 0 or iq_gain_imbalance_db != 0
                  or iq_phase_imbalance_deg != 0 or phase_noise_linewidth_hz > 0 or enable_pa),
             chip("DOPPLER", doppler_hz != 0 or doppler_rate_hz_s != 0),
@@ -1083,16 +1102,20 @@ with tab_gen:
         peak = np.max(psd)
         db = 10 * np.log10(psd / peak)
 
-        bw_theoretical = params.symbol_rate * (1 + params.rrc_alpha)
+        bw_theoretical = theoretical_bandwidth(params.symbol_rate, params.pulse_shape, params.rrc_alpha)
+        if params.pulse_shape == "nrz":
+            bw_sub, bw_tip = ("2 x Rs: null-to-null main lobe (no filter, sidelobes beyond)",
+                              "Unfiltered NRZ: sinc^2 main lobe between the first nulls at +/- symbol rate.")
+        else:
+            bw_sub, bw_tip = ("Rs x (1 + alpha), the reference for RF-Catcher",
+                              "Theoretical RRC spectral edge = symbol rate x (1 + alpha).")
 
         # --------------------------------------------------------------------------
         # Metric card: the theoretical occupied bandwidth is what RF-Catcher cares
         # about, shown as a single hero tile.
         # --------------------------------------------------------------------------
         hero_metrics = [
-            ("Occupied BW (theoretical)", f"{bw_theoretical/1e6:.3f}", "MHz",
-             "Rs x (1 + alpha), the reference for RF-Catcher",
-             "Theoretical RRC spectral edge = symbol rate x (1 + alpha)."),
+            ("Occupied BW (theoretical)", f"{bw_theoretical/1e6:.3f}", "MHz", bw_sub, bw_tip),
         ]
         hero_cols = st.columns(1)
         for col, (label, value, unit, sub, tooltip) in zip(hero_cols, hero_metrics):
@@ -1131,7 +1154,8 @@ with tab_gen:
             ))
             fig.add_vline(x=-bw_theoretical / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"))
             fig.add_vline(x=bw_theoretical / 2e6, line=dict(color="#ff5c7a", width=1, dash="dash"),
-                          annotation_text="theoretical edge", annotation_position="top right",
+                          annotation_text="theoretical edge" if params.pulse_shape == "rrc" else "first null",
+                          annotation_position="top right",
                           annotation_font_color="#ff5c7a")
             fig.update_layout(
                 title="Spectrum (PSD) -- real-time",
@@ -1146,16 +1170,19 @@ with tab_gen:
             st.caption(
                 "Note: the dashed red lines mark the theoretical occupied bandwidth edge "
                 "(+/- symbol_rate x (1 + alpha) / 2), matching the metric above."
+                if params.pulse_shape == "rrc" else
+                "Note: the dashed red lines mark the first nulls of the sinc^2 main lobe "
+                "(+/- symbol_rate), matching the metric above."
             )
 
         with side_col:
-            # Sampled from the actual (post-impairment) IQ through a matched RRC
-            # filter, not from ChainResult.symbols -- symbols are fixed before
+            # Sampled from the actual (post-impairment) IQ through the matched
+            # filter (RRC, or integrate-and-dump for NRZ), not from ChainResult.symbols -- symbols are fixed before
             # pulse shaping/impairments are ever applied, so plotting them would
             # always show a perfect constellation regardless of any Transmitter
             # Impairments setting. See pulse_shaping.matched_filter_sample().
             decision_points = matched_filter_sample(
-                result.iq, len(result.symbols), int(sps), rrc_taps(rrc_alpha, rrc_span, int(sps)),
+                result.iq, len(result.symbols), int(sps), pulse_taps(pulse_shape, rrc_alpha, rrc_span, int(sps)),
             )
             n_preview = min(3000, len(decision_points))
             idx = np.linspace(0, len(decision_points) - 1, n_preview).astype(int)
@@ -1362,7 +1389,8 @@ with tab_gen:
 
         export_key = (
             export_n_cadu, params.rs_e, params.interleave_depth, params.fec_rs, params.fec_conv,
-            params.conv_rate, params.conv_invert_g2, params.randomizer, params.input_format, params.rrc_alpha,
+            params.conv_rate, params.conv_invert_g2, params.randomizer, params.input_format, params.pulse_shape,
+            params.rrc_alpha,
             params.rrc_span, params.sps, params.symbol_rate, params.seed, payload_mode,
             output_dtype, output_peak, resample_enabled, target_fs if resample_enabled else None,
             export_rfcatcher, rf_frequency_hz, rf_bandwidth_hz,

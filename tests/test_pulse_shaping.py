@@ -3,7 +3,8 @@
 import numpy as np
 import pytest
 
-from ccsds_chain.pulse_shaping import RRCPulseShaper, matched_filter_sample, pulse_shape, rrc_taps
+from ccsds_chain.pulse_shaping import (RRCPulseShaper, matched_filter_sample, nrz_taps, pulse_shape, pulse_taps,
+                                       rrc_taps, theoretical_bandwidth)
 
 
 class TestRRCTaps:
@@ -156,3 +157,28 @@ class TestMatchedFilterSample:
         assert np.std(np.angle(plain[20:-20])) < 0.05
         # ... and visibly spin once one is applied.
         assert np.std(np.angle(rotated[20:-20])) > 0.5
+
+
+class TestNrzTaps:
+    def test_rectangular_unit_energy(self):
+        h = nrz_taps(4)
+        assert len(h) == 4 and np.allclose(h, h[0]) and np.isclose(np.sum(h ** 2), 1.0)
+
+    def test_matched_filter_recovers_symbols_exactly(self):
+        sps = 4
+        rng = np.random.default_rng(3)
+        bits = rng.integers(0, 2, size=(100, 2)) * 2 - 1
+        symbols = (bits[:, 0] + 1j * bits[:, 1]) / np.sqrt(2.0)
+        taps = nrz_taps(sps)
+        iq = pulse_shape(symbols, sps, taps)
+        assert np.allclose(matched_filter_sample(iq, len(symbols), sps, taps), symbols)
+
+    def test_pulse_taps_dispatch(self):
+        assert np.array_equal(pulse_taps("rrc", 0.35, 8, 4), rrc_taps(0.35, 8, 4))
+        assert np.array_equal(pulse_taps("nrz", 0.35, 8, 4), nrz_taps(4))
+        with pytest.raises(ValueError):
+            pulse_taps("gaussian", 0.35, 8, 4)
+
+    def test_theoretical_bandwidth(self):
+        assert theoretical_bandwidth(1e6, "rrc", 0.35) == pytest.approx(1.35e6)
+        assert theoretical_bandwidth(1e6, "nrz", 0.35) == pytest.approx(2e6)

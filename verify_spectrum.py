@@ -57,7 +57,11 @@ def main():
     alpha = meta.get("rrc_alpha")
     print(f"Occupied bandwidth -3dB:  {bw_3db / 1e6:.4f} MHz")
     print(f"Null-to-null bandwidth:   {bw_null / 1e6:.4f} MHz")
-    if symbol_rate and alpha is not None:
+    if symbol_rate and meta.get("pulse_shape") == "nrz":
+        print(f"Expected (Rs={symbol_rate / 1e6:.3f} MHz, NRZ, no filter): "
+              f"~{0.886 * symbol_rate / 1e6:.2f} MHz (-3dB, 0.886*Rs), "
+              f"~{2 * symbol_rate / 1e6:.2f} MHz (null-to-null, 2*Rs)")
+    elif symbol_rate and alpha is not None:
         print(f"Expected (Rs={symbol_rate / 1e6:.3f} MHz, alpha={alpha}): "
               f"~{symbol_rate / 1e6:.2f}-{symbol_rate * 1.05 / 1e6:.2f} MHz (-3dB), "
               f"~{symbol_rate * (1 + alpha) / 1e6:.2f} MHz (null-to-null, theoretical Rs*(1+alpha))")

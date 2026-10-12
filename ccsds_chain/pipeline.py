@@ -13,7 +13,7 @@ from .reed_solomon import rs_encode_interleaved
 from .convolutional import conv_encode, ConvEncoder
 from .scrambler import pn_sequence
 from .mapping import BITS_PER_SYMBOL, bits_to_nrzl, map_symbols
-from .pulse_shaping import rrc_taps, pulse_shape, RRCPulseShaper
+from .pulse_shaping import PULSE_SHAPES, pulse_shape, pulse_taps, RRCPulseShaper
 from .transfer_frame import PRIMARY_HEADER_BYTES, build_primary_header, vcid_schedule_counts
 from .impairments import (apply_doppler, apply_frequency_offset, apply_iq_imbalance,
                            apply_pa_nonlinearity, PhaseNoiseGenerator)
@@ -47,6 +47,7 @@ class ChainParams:
     bit_rate: int = 3_570_000
     symbol_rate: int = 1_785_000
     sps: int = 4
+    pulse_shape: str = "rrc"  # "rrc" (rrc_alpha, rrc_span) or "nrz" (rectangular pulses, no filter)
     rrc_alpha: float = 0.35
     rrc_span: int = 8
     rs_e: int = 16  # error-correction capability, in symbols: 8 or 16 (12.5)
@@ -226,6 +227,8 @@ def _validate_chain_params(p: ChainParams) -> None:
         raise NotImplementedError(f"modulation {p.modulation!r} not implemented (expected 'QPSK' or 'BPSK')")
     if p.encoding != "NRZ-L":
         raise NotImplementedError(f"encoding {p.encoding!r} not implemented (baseline: NRZ-L)")
+    if p.pulse_shape not in PULSE_SHAPES:
+        raise NotImplementedError(f"pulse_shape {p.pulse_shape!r} not implemented (expected one of {PULSE_SHAPES})")
     if p.input_format not in INPUT_FORMATS:
         raise NotImplementedError(f"input_format {p.input_format!r} not implemented (expected one of {INPUT_FORMATS})")
     if p.input_format == "asm_frame" and p.randomizer == "none":
@@ -529,8 +532,9 @@ def _chain_meta(p: ChainParams, prep: _PayloadPrep, sample_rate: float) -> dict:
         "symbol_rate": p.symbol_rate,
         "sample_rate": sample_rate,
         "samples_per_symbol": p.sps,
-        "rrc_alpha": p.rrc_alpha,
-        "rrc_span": p.rrc_span,
+        "pulse_shape": p.pulse_shape,
+        "rrc_alpha": p.rrc_alpha if p.pulse_shape == "rrc" else None,
+        "rrc_span": p.rrc_span if p.pulse_shape == "rrc" else None,
         "input_format": p.input_format,
         "cadu_sync_skipped_bytes": prep.sync_skipped_bytes if prep.is_cadu_input else None,
         "cadu_wrapper_bytes_min": prep.cadu_wrapper_min_bytes,
@@ -654,13 +658,13 @@ def run_chain(
     symbols = map_symbols(bipolar, p.modulation)
 
     if progress_callback is not None:
-        progress_callback(_PROGRESS_RS_ASM_WEIGHT + _PROGRESS_CONV_MAP_WEIGHT, "Pulse shaping (RRC filter)...")
+        progress_callback(_PROGRESS_RS_ASM_WEIGHT + _PROGRESS_CONV_MAP_WEIGHT, "Pulse shaping...")
 
-    taps = rrc_taps(p.rrc_alpha, p.rrc_span, p.sps)
+    taps = pulse_taps(p.pulse_shape, p.rrc_alpha, p.rrc_span, p.sps)
     pulse_progress = (
         (lambda frac: progress_callback(
             _PROGRESS_RS_ASM_WEIGHT + _PROGRESS_CONV_MAP_WEIGHT + _PROGRESS_PULSE_WEIGHT * frac,
-            "Pulse shaping (RRC filter)...",
+            "Pulse shaping...",
         ))
         if progress_callback is not None else None
     )
@@ -777,7 +781,7 @@ def export_chain(
     t0 = time.time()
     _validate_chain_params(p)
     sample_rate = p.symbol_rate * p.sps
-    taps = rrc_taps(p.rrc_alpha, p.rrc_span, p.sps)
+    taps = pulse_taps(p.pulse_shape, p.rrc_alpha, p.rrc_span, p.sps)
     resampling = target_fs is not None and target_fs != sample_rate
 
     # Sized from p.n_cadu and the cheap, data-independent unit_bytes alone
