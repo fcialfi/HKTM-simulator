@@ -504,17 +504,17 @@ payload -> RS(255,223) interleave x5 -> [pseudo-randomizer, ASM excluded]
         ["5 \u00b7 Deterministic error injection", "Exact number of RS symbol errors in a chosen codeword of chosen "
          "CADUs or of one Virtual Channel."],
         ["6 \u00b7 Pulse shaping", "RRC filter (roll-off \u03b1, span) or <b>None (NRZ, rectangular)</b>; "
-         "samples per symbol."],
+         "samples per symbol; optional <b>Butterworth output filter</b> (order, \u22123 dB bandwidth)."],
         ["7 \u00b7 Impairments &amp; Doppler", "LO frequency offset and phase noise; IQ gain and phase imbalance; PA "
          "saturation and AM-PM; channel Doppler shift and rate."],
     ], [4.6, 7.4])
     side_tbl = Table([[side[0], Image(os.path.join(IMG, "gui_sidebar.png"), width=4.0 * cm,
-                                      height=4.0 * cm * 1060 / 450)]],
+                                      height=4.0 * cm * 1220 / 450)]],
                      colWidths=[12.3 * cm, 4.7 * cm])
     side_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
     N.fig += 1
-    st += [side_tbl, Paragraph(f"Figure {N.fig} \u2013 Sidebar sections (right: section 6 with the unfiltered NRZ "
-                               "pulse shape selected)", S["caption"])]
+    st += [side_tbl, Paragraph(f"Figure {N.fig} \u2013 Sidebar sections (right: section 6 with no pulse shaping and "
+                               "the Butterworth output filter)", S["caption"])]
     st += [H2("Signal generator tab: live preview"),
            P("The <b>Live preview</b> panel shows:")]
     st += BUL([
@@ -653,8 +653,20 @@ python generate_signal.py --pa-backoff-db -6 --pa-smoothness 3 --pa-am-pm-deg-pe
              "not band-limited. Use 8 or more samples per symbol: at 4, the sidelobes above half the sample rate fold "
              "back into the band. Resampling to a lower rate removes them above the new Nyquist frequency. The "
              "constellation is computed with an integrate-and-dump (rectangular) matched filter."),
-           FIG("gui_nrz.png", "Live preview with no filter: sinc\u00b2 spectrum with the first nulls marked, "
-               "rectangular I/Q waveform", width_cm=14.5),
+           H3("Output filter"),
+           P("A real transmitter without pulse shaping still has an output filter after the power amplifier, "
+             "which lowers the sidelobes. Tick <b>Butterworth output filter</b> in section 6 (order and \u22123 dB "
+             "bandwidth), or on the CLI:"),
+           CODE("python generate_signal.py --pulse-shape nrz --sps 8 --output-filter-order 2 -o aws_like.raw"),
+           P("The filter is an RF band-pass centred on the carrier, \u22123 dB bandwidth 1.9 \u00d7 Rs by default "
+             "(<font face='%s'>--output-filter-bw-hz</font> to change it). With order 2 the sidelobes drop to about "
+             "\u221222, \u221235, \u221242 dB, close to the \u221221, \u221234, \u221245 dB measured on AWS. It reproduces the "
+             "analog filter's response within about 1 dB up to 0.45 \u00d7 the sample rate. Like a real filter it "
+             "delays the signal and adds a little inter-symbol interference: the constellation is shown after "
+             "removing the delay, as a receiver's timing recovery would, so only the interference remains "
+             "(small spread of each point)." % MONO),
+           FIG("gui_nrz.png", "Live preview with no pulse shaping and a 2nd-order Butterworth output filter: "
+               "sinc\u00b2 main lobe with lowered sidelobes, first nulls marked", width_cm=14.5),
            H2("Doppler of a pass"),
            CODE("python generate_signal.py --doppler-hz 30000 --doppler-rate-hz-s -400 -o doppler.raw"),
            P("Frequency shift at the start of the file plus a constant rate (Hz/s): a linear approximation of the "
@@ -722,8 +734,8 @@ python generate_signal.py --pa-backoff-db -6 --pa-smoothness 3 --pa-am-pm-deg-pe
         "The baseline (rate 1/2) is never affected.",
         "Only NRZ-L with polarity 1 \u2192 +1; check the polarity expected by the receiver.",
         "Only the TM primary header is synthesised: no secondary header, no Space Packets, no frame CRC.",
-        "Unfiltered NRZ pulses are ideal rectangles: the output filter of a real unshaped transmitter, which "
-        "lowers the sidelobes (AWS: about \u221221 dB instead of \u221213 dB), is not modelled.",
+        "The optional output filter is an ideal Butterworth (no ripple, symmetric about the carrier), not the "
+        "measured response of a specific transmitter filter.",
         "The .rfcatcher output matches a real recording byte for byte, but playback on the instrument has not "
         "been confirmed yet.",
         "The RRC filter adds a transient of half the filter span at the start and end of the file.",

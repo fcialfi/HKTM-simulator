@@ -202,6 +202,19 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
      `--target-fs` resampling low-pass removes them above the new Nyquist
      frequency. The receive-side view (GUI constellation) uses the same
      rectangle as matched filter, i.e. integrate-and-dump.
+   - Optional **Butterworth output filter** (`--output-filter-order N`,
+     `--output-filter-bw-hz`, GUI "Butterworth output filter" in the same
+     section), applied after the PA as the last transmitter stage: an RF
+     band-pass centred on the carrier (a low-pass at baseband) of -3 dB
+     bandwidth 1.9 x Rs by default. On an NRZ signal it lowers the sidelobes
+     as a real transmitter's output filter does: order 2 gives about
+     -22/-35/-42 dB, close to the -21/-34/-45 dB measured on AWS. The taps
+     are the analog Butterworth response (magnitude and phase) sampled at
+     the native rate, so the attenuation matches the analog filter within
+     about 1 dB up to 0.45 x sample rate (a bilinear IIR would add tens of
+     dB near Nyquist). Like a real filter it adds group delay and a little
+     inter-symbol interference; the GUI constellation removes the group
+     delay first, as a receiver's timing recovery would.
 9. **Transmitter impairments** (optional, disabled by default -- "Transmitter
    Impairments" in the GUI, or the flags named below on the CLI), applied to
    the pulse-shaped IQ (`ccsds_chain/impairments.py`): a real transmitter's
@@ -363,6 +376,7 @@ python generate_signal.py --n-cadu 500 --randomizer long -o test.raw
 python generate_signal.py --rs-e 8 --interleave-depth 2 --conv-rate 3/4 -o test2.raw
 python generate_signal.py --modulation BPSK -o test3.raw
 python generate_signal.py --pulse-shape nrz --sps 8 -o test_nrz.raw   # no filter (rectangular NRZ)
+python generate_signal.py --pulse-shape nrz --sps 8 --output-filter-order 2 -o test_aws.raw   # + output filter, AWS-like
 python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # for an RF Recorder/Replayer
 python generate_signal.py --rfcatcher --target-fs 10e6 --rf-frequency-mhz 1707   # RF-Catcher recording
 
@@ -511,10 +525,9 @@ running the decoder for real, against real injected errors, can show.
   Channel Frame Count) can be built in with `--vcid-list` (see above), but
   only that: no secondary header, no real CCSDS Space Packet structure
   inside the frame, and no CRC.
-- **NRZ pulses are ideal**: `--pulse-shape nrz` gives perfectly
-  rectangular pulses. A real unshaped transmitter also has an output
-  filter that lowers the sidelobes (AWS: about -21 dB instead of -13 dB);
-  that filter is not modelled.
+- **Output filter model**: the optional output filter is a Butterworth
+  low-pass at baseband (symmetric band-pass at RF), not the measured
+  response of a specific transmitter filter (no ripple, no asymmetry).
 - **RRC filter transient**: since only a single RRC filter is applied (not
   a matched Tx/Rx pair), the output has a transient of `RRC_SPAN/2` symbols
   at the start and end.
