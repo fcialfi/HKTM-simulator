@@ -33,7 +33,7 @@ ccsds_chain/
   convolutional.py        convolutional K=7, rate 1/2 punctured to 2/3-7/8
   scrambler.py             CCSDS pseudo-randomizer (131071-bit and 255-bit legacy)
   mapping.py               NRZ-L + QPSK Gray / BPSK
-  pulse_shaping.py         RRC filter
+  pulse_shaping.py         RRC filter, or rectangular NRZ pulses (no filter)
   impairments.py           transmitter impairments (LO, IQ, PA) and channel Doppler
   rfcatcher.py             RF-Catcher .rfcatcher recording format (read/write)
   spectrum.py              PSD/occupied bandwidth (used by app.py and verify_spectrum.py)
@@ -52,7 +52,7 @@ ccsds_chain/
 | Encoding        | NRZ-L                      | yes (only NRZ-L implemented) |
 | RS FEC          | RS(255,223), interleave depth 5 | yes (on/off; E=8 or 16; I=1,2,3,4,5,8) |
 | Convolutional FEC | rate 1/2, K=7, G1=171o, G2=133o | yes (on/off; rate 1/2, 2/3, 3/4, 5/6, 7/8; invert G2 only at rate 1/2) |
-| Pulse shaping   | RRC, alpha 0.35, span 8 symbols, 4 samples/symbol | yes (`--alpha`, `--span`, `--sps`) |
+| Pulse shaping   | RRC, alpha 0.35, span 8 symbols, 4 samples/symbol | yes (`--pulse-shape rrc` or `nrz` = no filter; `--alpha`, `--span`, `--sps`) |
 | Pseudo-randomizer | none                  | yes (none / 255-bit legacy / 131071-bit, standard default since 2023) |
 | CADU            | 4-byte ASM (0x1ACFFC1D, uncoded) + 1275-byte RS-encoded = 1279 bytes | depends on I (CADU = 4 + 255*I bytes) |
 | Spacecraft ID   | 0x123 (291), 10 bits | yes (`--spacecraft-id`, 0-1023; written only with `--vcid-list`) |
@@ -66,7 +66,7 @@ over the CADU stream:
 ```
 payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
         -> + ASM (per CADU, forms the CADU) -> conv. K=7 r=1/2 (over the CADU stream)
-        -> NRZ-L -> QPSK (Gray) or BPSK -> RRC -> IQ int16 (RF-Catcher)
+        -> NRZ-L -> QPSK (Gray) or BPSK -> RRC (or no filter) -> IQ int16 (RF-Catcher)
 ```
 
 1. **Payload**: reproducible pseudo-random data (seed) per CADU, or real data
@@ -189,7 +189,19 @@ payload -> RS(255,223) interleave x5 -> [scrambler, excludes ASM]
    only (Q=0), at the same unit energy -- half the bit rate of QPSK at the
    same symbol rate, but the modulation the base rate-1/2 convolutional
    code's G2 inversion (3.3.1(5)) is specified against.
-8. **RRC pulse shaping** (configurable alpha, default 0.35).
+8. **Pulse shaping** (`--pulse-shape`, GUI "6 · Pulse shaping"):
+   - `rrc` (default): Root-Raised-Cosine filter, configurable alpha
+     (default 0.35) and span. Band-limited spectrum ending at
+     Rs x (1 + alpha) / 2 each side.
+   - `nrz`: no filter, rectangular pulses one symbol long, as from a
+     transmitter without pulse shaping (e.g. AWS). sinc^2 spectrum: first
+     nulls at +/-Rs (null-to-null 2 x Rs, the same main lobe as an RRC with
+     alpha = 1) and sidelobes at about -13, -18, -21 dB decaying as 1/f^2,
+     with no band limit. Sidelobes above sample rate / 2 fold back into the
+     band, so use `--sps 8` (or more) when the far spectrum matters; a
+     `--target-fs` resampling low-pass removes them above the new Nyquist
+     frequency. The receive-side view (GUI constellation) uses the same
+     rectangle as matched filter, i.e. integrate-and-dump.
 9. **Transmitter impairments** (optional, disabled by default -- "Transmitter
    Impairments" in the GUI, or the flags named below on the CLI), applied to
    the pulse-shaped IQ (`ccsds_chain/impairments.py`): a real transmitter's
@@ -350,6 +362,7 @@ python generate_signal.py                       # baseline parameters, saves to 
 python generate_signal.py --n-cadu 500 --randomizer long -o test.raw
 python generate_signal.py --rs-e 8 --interleave-depth 2 --conv-rate 3/4 -o test2.raw
 python generate_signal.py --modulation BPSK -o test3.raw
+python generate_signal.py --pulse-shape nrz --sps 8 -o test_nrz.raw   # no filter (rectangular NRZ)
 python generate_signal.py --dtype int16 --target-fs 10e6 --peak 0.9   # for an RF Recorder/Replayer
 python generate_signal.py --rfcatcher --target-fs 10e6 --rf-frequency-mhz 1707   # RF-Catcher recording
 
@@ -498,6 +511,10 @@ running the decoder for real, against real injected errors, can show.
   Channel Frame Count) can be built in with `--vcid-list` (see above), but
   only that: no secondary header, no real CCSDS Space Packet structure
   inside the frame, and no CRC.
+- **NRZ pulses are ideal**: `--pulse-shape nrz` gives perfectly
+  rectangular pulses. A real unshaped transmitter also has an output
+  filter that lowers the sidelobes (AWS: about -21 dB instead of -13 dB);
+  that filter is not modelled.
 - **RRC filter transient**: since only a single RRC filter is applied (not
   a matched Tx/Rx pair), the output has a transient of `RRC_SPAN/2` symbols
   at the start and end.
@@ -525,7 +542,8 @@ measured on the spectrum) around the band center. With the baseline
 parameters (Rs=1.785 MS/s, alpha=0.35), the expected -3dB occupied
 bandwidth is close to Rs (~1.7-1.8 MHz), and the null-to-null bandwidth
 close to Rs*(1+alpha) (~2.3-2.4 MHz, the exact theoretical value for an
-ideal RRC filter).
+ideal RRC filter). With `--pulse-shape nrz` it expects -3 dB at ~0.886 x Rs
+and null-to-null at 2 x Rs (~3.57 MHz).
 
 ## Building the manual
 

@@ -600,11 +600,14 @@ class TestExportChainMatchesRunChain:
     carried across batches -- not just the (trivial) single-batch case a
     small n_cadu would otherwise hit by default."""
 
-    @pytest.mark.parametrize("modulation,conv_rate", [("QPSK", "1/2"), ("BPSK", "1/2"), ("QPSK", "3/4")])
-    def test_forced_tiny_batches_match_whole_array_run(self, tmp_path, monkeypatch, modulation, conv_rate):
+    @pytest.mark.parametrize("modulation,conv_rate,pulse_shape", [
+        ("QPSK", "1/2", "rrc"), ("BPSK", "1/2", "rrc"), ("QPSK", "3/4", "rrc"), ("QPSK", "1/2", "nrz"),
+    ])
+    def test_forced_tiny_batches_match_whole_array_run(self, tmp_path, monkeypatch, modulation, conv_rate,
+                                                       pulse_shape):
         monkeypatch.setattr(pipeline, "_EXPORT_BATCH_TARGET_BYTES", 1)  # forces batch_n_cadu == 1
 
-        p = _small_params(n_cadu=6, modulation=modulation, conv_rate=conv_rate)
+        p = _small_params(n_cadu=6, modulation=modulation, conv_rate=conv_rate, pulse_shape=pulse_shape)
         expected = pack_iq_interleaved(normalize_peak(run_chain(p).iq, peak=0.9), "int16")
 
         out_path = tmp_path / "out.raw"
@@ -633,3 +636,37 @@ class TestExportChainMatchesRunChain:
         native_fs = p.symbol_rate * p.sps
         with pytest.raises(MemoryError):
             export_chain(p, str(tmp_path / "out.raw"), target_fs=native_fs / 2)
+
+
+class TestNrzPulseShape:
+    """pulse_shape='nrz': no filter, each symbol held for one symbol period."""
+
+    def test_each_symbol_is_held_for_sps_samples(self):
+        p = _small_params(n_cadu=2, pulse_shape="nrz")
+        r = run_chain(p)
+        n = len(r.symbols)
+        held = r.iq[:n * p.sps].reshape(n, p.sps)
+        assert np.allclose(held, held[:, :1])
+        # same symbol sequence (up to the common amplitude scale)
+        scale = held[0, 0] / r.symbols[0]
+        assert np.allclose(held[:, 0], r.symbols * scale)
+
+    def test_spectrum_has_first_nulls_at_the_symbol_rate(self):
+        p = _small_params(n_cadu=4, pulse_shape="nrz", sps=8)
+        iq = run_chain(p).iq
+        nfft = 4096
+        segs = iq[:len(iq) // nfft * nfft].reshape(-1, nfft) * np.hanning(nfft)
+        psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(segs, axis=1)) ** 2, axis=0))
+        f = np.fft.fftshift(np.fft.fftfreq(nfft, 1 / (p.symbol_rate * p.sps)))
+        db = 10 * np.log10(psd / psd.max())
+        level = lambda x: db[np.argmin(np.abs(f - x))]  # noqa: E731
+        assert level(p.symbol_rate) < -25 and level(-p.symbol_rate) < -25      # first nulls
+        assert -16 < level(1.43 * p.symbol_rate) < -10                        # first sidelobe ~ -13.3 dB
+
+    def test_meta_records_the_pulse_shape(self):
+        meta = run_chain(_small_params(n_cadu=1, pulse_shape="nrz")).meta
+        assert meta["pulse_shape"] == "nrz" and meta["rrc_alpha"] is None
+
+    def test_unknown_pulse_shape_is_rejected(self):
+        with pytest.raises(NotImplementedError):
+            run_chain(_small_params(n_cadu=1, pulse_shape="gaussian"))

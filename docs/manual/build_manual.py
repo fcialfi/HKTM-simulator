@@ -442,7 +442,7 @@ python generate_signal.py -h    # CLI help
            CODE("""
 payload -> RS(255,223) interleave x5 -> [pseudo-randomizer, ASM excluded]
         -> + ASM (per CADU)  -> convolutional K=7 r=1/2 (over the CADU stream)
-        -> NRZ-L -> QPSK (Gray) or BPSK -> RRC -> [impairments] -> [Doppler]
+        -> NRZ-L -> QPSK (Gray) or BPSK -> RRC or no filter -> [impairments] -> [Doppler]
         -> normalisation -> [resampling] -> IQ file
 """),
            H2("Baseline parameters")]
@@ -459,7 +459,8 @@ payload -> RS(255,223) interleave x5 -> [pseudo-randomizer, ASM excluded]
         ["CADU length", "4 + 255 \u00d7 I = 1279 bytes", "depends on I"],
         ["Convolutional", "K = 7, rate 1/2, G1 = 171o, G2 = 133o, G2 inverted",
          "on/off; rate 1/2, 2/3, 3/4, 5/6, 7/8"],
-        ["Pulse shaping", "RRC, \u03b1 = 0.35, span 8 symbols, 4 samples/symbol", "\u03b1, span, samples/symbol"],
+        ["Pulse shaping", "RRC, \u03b1 = 0.35, span 8 symbols, 4 samples/symbol",
+         "RRC (\u03b1, span) or none (rectangular NRZ pulses); samples/symbol"],
         ["Spacecraft ID", "0x123 (291)", "0\u20131023; written only with Virtual Channels enabled"],
         ["Output", "float32 IQ, peak 0.9, native rate (7.14 MS/s)",
          "int16, .rfcatcher, peak amplitude, resampling to a fixed rate"],
@@ -502,22 +503,23 @@ payload -> RS(255,223) interleave x5 -> [pseudo-randomizer, ASM excluded]
          "Channels</b> (VCID list) and <b>Spacecraft ID</b>."],
         ["5 \u00b7 Deterministic error injection", "Exact number of RS symbol errors in a chosen codeword of chosen "
          "CADUs or of one Virtual Channel."],
-        ["6 \u00b7 Pulse shaping (RRC)", "Roll-off \u03b1 and filter span."],
+        ["6 \u00b7 Pulse shaping", "RRC filter (roll-off \u03b1, span) or <b>None (NRZ, rectangular)</b>; "
+         "samples per symbol."],
         ["7 \u00b7 Impairments &amp; Doppler", "LO frequency offset and phase noise; IQ gain and phase imbalance; PA "
          "saturation and AM-PM; channel Doppler shift and rate."],
     ], [4.6, 7.4])
     side_tbl = Table([[side[0], Image(os.path.join(IMG, "gui_sidebar.png"), width=4.0 * cm,
-                                      height=4.0 * cm * 1425 / 450)]],
+                                      height=4.0 * cm * 1060 / 450)]],
                      colWidths=[12.3 * cm, 4.7 * cm])
     side_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
     N.fig += 1
-    st += [side_tbl, Paragraph(f"Figure {N.fig} \u2013 Sidebar sections (right: part of the sidebar with section 7 "
-                               "open)", S["caption"])]
+    st += [side_tbl, Paragraph(f"Figure {N.fig} \u2013 Sidebar sections (right: section 6 with the unfiltered NRZ "
+                               "pulse shape selected)", S["caption"])]
     st += [H2("Signal generator tab: live preview"),
            P("The <b>Live preview</b> panel shows:")]
     st += BUL([
         "the chain stages as a row of labels: active stages are highlighted, disabled ones are greyed out;",
-        "the theoretical occupied bandwidth Rs \u00d7 (1 + \u03b1), duration, sample rate, number of symbols and "
+        "the theoretical occupied bandwidth (RRC: Rs \u00d7 (1 + \u03b1); no filter: 2 \u00d7 Rs), duration, sample rate, number of symbols and "
         "compute time of the preview;",
         "the <b>spectrum</b> (PSD) with the theoretical band edges as dashed red lines;",
         "the <b>constellation</b>, taken after a matched filter, so impairments (phase noise, IQ imbalance, PA) "
@@ -608,7 +610,8 @@ python analyze_recording.py capture.iq --fs 10e6 --dtype int16 --save-frames fra
            CODE("python verify_spectrum.py output/qpsk_ccsds_....iq --plot spectrum.png"),
            P("Computes the PSD of a generated file (reading its .meta.json for rate and format) and measures the "
              "\u22123 dB and null-to-null bandwidths. For the RRC baseline (Rs = 1.785 MS/s, \u03b1 = 0.35): "
-             "\u22123 dB \u2248 Rs, null-to-null \u2248 Rs (1 + \u03b1) \u2248 2.41 MHz.")]
+             "\u22123 dB \u2248 Rs, null-to-null \u2248 Rs (1 + \u03b1) \u2248 2.41 MHz. Without filter (NRZ): "
+             "\u22123 dB \u2248 0.886 \u00d7 Rs, null-to-null = 2 \u00d7 Rs \u2248 3.57 MHz.")]
 
     # ---------------------------------------------------------------- 6
     st += H1("Test scenarios")
@@ -640,6 +643,18 @@ python generate_signal.py --pa-backoff-db -6 --pa-smoothness 3 --pa-am-pm-deg-pe
 """),
            P("Checks carrier recovery, image rejection and tolerance to EVM. A PA driven into saturation produces "
              "spectral regrowth outside the occupied band."),
+           H2("Unfiltered NRZ signal"),
+           P("Some satellites (AWS, for example) transmit QPSK without pulse shaping: rectangular NRZ pulses, "
+             "followed at most by an output band-pass filter. Select <b>None (NRZ, rectangular)</b> in sidebar "
+             "section 6, or on the CLI:"),
+           CODE("python generate_signal.py --pulse-shape nrz --sps 8 -o nrz.raw"),
+           P("The spectrum is a sinc\u00b2: first nulls at \u00b1Rs (null-to-null 2 \u00d7 Rs = 3.57 MHz, the same main "
+             "lobe as an RRC with \u03b1 = 1) and sidelobes at about \u221213, \u221218, \u221221 dB that decay slowly and are "
+             "not band-limited. Use 8 or more samples per symbol: at 4, the sidelobes above half the sample rate fold "
+             "back into the band. Resampling to a lower rate removes them above the new Nyquist frequency. The "
+             "constellation is computed with an integrate-and-dump (rectangular) matched filter."),
+           FIG("gui_nrz.png", "Live preview with no filter: sinc\u00b2 spectrum with the first nulls marked, "
+               "rectangular I/Q waveform", width_cm=14.5),
            H2("Doppler of a pass"),
            CODE("python generate_signal.py --doppler-hz 30000 --doppler-rate-hz-s -400 -o doppler.raw"),
            P("Frequency shift at the start of the file plus a constant rate (Hz/s): a linear approximation of the "
@@ -707,7 +722,8 @@ python generate_signal.py --pa-backoff-db -6 --pa-smoothness 3 --pa-am-pm-deg-pe
         "The baseline (rate 1/2) is never affected.",
         "Only NRZ-L with polarity 1 \u2192 +1; check the polarity expected by the receiver.",
         "Only the TM primary header is synthesised: no secondary header, no Space Packets, no frame CRC.",
-        "Pulse shaping is always RRC: an unshaped (NRZ, rectangular pulse) signal is not produced.",
+        "Unfiltered NRZ pulses are ideal rectangles: the output filter of a real unshaped transmitter, which "
+        "lowers the sidelobes (AWS: about \u221221 dB instead of \u221213 dB), is not modelled.",
         "The .rfcatcher output matches a real recording byte for byte, but playback on the instrument has not "
         "been confirmed yet.",
         "The RRC filter adds a transient of half the filter span at the start and end of the file.",

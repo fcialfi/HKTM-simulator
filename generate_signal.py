@@ -6,7 +6,8 @@ other IQ recorder/replayer.
 Chain: payload -> RS(255,223 or 255,239) interleaved -> optional CCSDS
 pseudo-randomizer (excludes ASM) -> ASM prepend per CADU -> convolutional
 K=7, rate 1/2 (or punctured to 2/3, 3/4, 5/6, 7/8) over the CADU stream
-(ASM included) -> NRZ-L -> QPSK (Gray) or BPSK -> RRC -> peak-normalize ->
+(ASM included) -> NRZ-L -> QPSK (Gray) or BPSK -> RRC (or unfiltered NRZ
+pulses) -> peak-normalize ->
 optional resample -> raw interleaved IQ (float32 or int16), no header.
 
 With an ASM-framed --input-format, the payload already starts each record
@@ -32,6 +33,7 @@ import os
 from ccsds_chain import rfcatcher
 from ccsds_chain.mapping import BITS_PER_SYMBOL
 from ccsds_chain.pipeline import ASM_FRAMED_INPUT_FORMATS, INPUT_FORMATS, ChainParams, export_chain
+from ccsds_chain.pulse_shaping import theoretical_bandwidth
 from ccsds_chain.utils import resample_ratio
 
 # --------------------------------------------------------------------------
@@ -43,6 +45,7 @@ SYMBOL_RATE = 1_785_000        # symbol/s (bit_rate = symbol_rate * bits/symbol,
 SAMPLES_PER_SYM = 4            # "native" oversampling factor (internal, pre-resample)
 RRC_ALPHA = 0.35
 RRC_SPAN = 8                   # RRC taps = RRC_SPAN * SAMPLES_PER_SYM + 1
+PULSE_SHAPE = "rrc"            # "rrc" or "nrz" (rectangular pulses, no filter)
 
 RS_E = 16                       # error correction capability, in symbols: 8 or 16
 RS_N = 255
@@ -76,9 +79,15 @@ def build_cli():
                     help="QPSK (baseline, 2 bits/symbol) or BPSK (1 bit/symbol, half the bit "
                          "rate at the same symbol rate -- the modulation the base rate-1/2 "
                          "convolutional code's G2 inversion, CCSDS 3.3.1(5), is specified against)")
-    p.add_argument("--alpha", type=float, default=RRC_ALPHA)
-    p.add_argument("--sps", type=int, default=SAMPLES_PER_SYM)
-    p.add_argument("--span", type=int, default=RRC_SPAN)
+    p.add_argument("--pulse-shape", choices=["rrc", "nrz"], default=PULSE_SHAPE,
+                    help="'rrc': Root-Raised-Cosine filter (--alpha, --span); 'nrz': no filter, "
+                         "rectangular pulses one symbol long (sinc^2 spectrum, first nulls at "
+                         "+/-symbol rate, sidelobes decaying as 1/f^2), like a transmitter without "
+                         "pulse shaping. With nrz the sidelobes above sample rate/2 fold back: use "
+                         "--sps 8 or more for a cleaner spectrum")
+    p.add_argument("--alpha", type=float, default=RRC_ALPHA, help="RRC roll-off (rrc only)")
+    p.add_argument("--sps", type=int, default=SAMPLES_PER_SYM, help="samples per symbol (native oversampling)")
+    p.add_argument("--span", type=int, default=RRC_SPAN, help="RRC length in symbols (rrc only)")
     p.add_argument("--no-rs", action="store_true", help="disable Reed-Solomon FEC")
     p.add_argument("--rs-e", type=int, choices=[8, 16], default=RS_E, help="RS error correction capability")
     p.add_argument("--interleave-depth", type=int, choices=[1, 2, 3, 4, 5, 8], default=INTERLEAVE_DEPTH)
@@ -235,6 +244,7 @@ def main():
         bit_rate=SYMBOL_RATE * BITS_PER_SYMBOL[args.modulation],
         symbol_rate=SYMBOL_RATE,
         sps=args.sps,
+        pulse_shape=args.pulse_shape,
         rrc_alpha=args.alpha,
         rrc_span=args.span,
         rs_e=args.rs_e,
@@ -307,7 +317,10 @@ def main():
     print("[6/9] NRZ-L mapping (direct bipolar)")
     print(f"[7/9] {params.modulation} mapping"
           + (" (Gray, unit energy)" if params.modulation == "QPSK" else " (unit energy, I only)"))
-    print(f"[8/9] Pulse shaping RRC (alpha={params.rrc_alpha}, span={params.rrc_span}, sps={params.sps})")
+    if params.pulse_shape == "nrz":
+        print(f"[8/9] No pulse shaping: rectangular NRZ pulses (sps={params.sps})")
+    else:
+        print(f"[8/9] Pulse shaping RRC (alpha={params.rrc_alpha}, span={params.rrc_span}, sps={params.sps})")
     impairments = []
     if params.freq_offset_hz != 0:
         impairments.append(f"freq offset {params.freq_offset_hz:+.1f} Hz")
@@ -381,7 +394,8 @@ def main():
         out_rate = export_result["meta"]["output_sample_rate"]
         rf_bw = args.rf_bandwidth_mhz * 1e6 if args.rf_bandwidth_mhz is not None else rfcatcher.linked_bandwidth(out_rate)
         for problem in rfcatcher.check_parameters(out_rate, args.rf_frequency_mhz * 1e6, rf_bw,
-                                                  params.symbol_rate * (1 + params.rrc_alpha)):
+                                                  theoretical_bandwidth(params.symbol_rate, params.pulse_shape,
+                                                                        params.rrc_alpha)):
             print(f"WARNING: {problem}")
         rf_meta = rfcatcher.build_metadata(out_rate, export_result["meta"]["output_n_samples"],
                                            args.rf_frequency_mhz * 1e6, rf_bw, template=template)

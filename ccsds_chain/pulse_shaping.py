@@ -1,4 +1,4 @@
-"""Root-Raised-Cosine pulse shaping."""
+"""Pulse shaping: Root-Raised-Cosine filter, or none (rectangular NRZ pulses)."""
 
 from typing import Callable, Optional
 
@@ -26,6 +26,36 @@ def rrc_taps(alpha: float, span: int, sps: int) -> np.ndarray:
             h[i] = num / den
 
     return h / np.sqrt(np.sum(h ** 2))
+
+
+PULSE_SHAPES = ("rrc", "nrz")
+
+
+def nrz_taps(sps: int) -> np.ndarray:
+    """Rectangular pulse one symbol long ("no filter"): each symbol is held
+    for `sps` samples, the sinc^2 spectrum of an unshaped NRZ transmitter
+    (first nulls at +/-symbol rate, sidelobes decaying as 1/f^2). Normalized
+    to unit filter energy like `rrc_taps()`. Used as its own matched filter
+    it is an integrate-and-dump over one symbol."""
+    return np.full(sps, 1.0 / np.sqrt(sps))
+
+
+def pulse_taps(shape: str, alpha: float, span: int, sps: int) -> np.ndarray:
+    """Transmit filter for `shape`: "rrc" (alpha, span) or "nrz" (rectangular,
+    alpha/span unused). The same taps serve as the matched filter in
+    `matched_filter_sample()`."""
+    if shape == "rrc":
+        return rrc_taps(alpha, span, sps)
+    if shape == "nrz":
+        return nrz_taps(sps)
+    raise ValueError(f"pulse shape {shape!r} not implemented (expected one of {PULSE_SHAPES})")
+
+
+def theoretical_bandwidth(symbol_rate: float, shape: str, alpha: float) -> float:
+    """Reference occupied bandwidth: symbol_rate x (1 + alpha) for RRC (where
+    the spectrum ends); for NRZ the null-to-null main lobe, 2 x symbol_rate
+    (the sinc^2 sidelobes beyond it are not band-limited)."""
+    return symbol_rate * (2.0 if shape == "nrz" else 1.0 + alpha)
 
 
 _CHUNK_SYMBOLS = 200_000
