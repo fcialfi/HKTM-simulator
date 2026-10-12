@@ -4,6 +4,7 @@ __pycache__/
 *.meta.json
 *.png
 !assets/*.png
+!docs/manual/img/*.png
 .venv/
 *.egg-info/
 .pytest_cache/
