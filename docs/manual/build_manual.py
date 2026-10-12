@@ -724,41 +724,6 @@ python generate_signal.py --pa-backoff-db -6 --pa-smoothness 3 --pa-am-pm-deg-pe
                 "licence files; both are excluded by .gitignore. If the private key is lost, a new key pair, new "
                 "licences and a rebuild are needed.")]
 
-    # ---------------------------------------------------------------- 9
-    st += H1("Limitations and troubleshooting")
-    st += [H2("Known limitations")]
-    st += BUL([
-        "Turbo and LDPC codes (CCSDS 131.0-B-5 sections 6\u20138) are not implemented.",
-        "Transfer Frame length constraints and RS virtual fill are not implemented: with QPSK, some combinations "
-        "of punctured code rate and CADU count give an odd number of coded bits and are refused with an error. "
-        "The baseline (rate 1/2) is never affected.",
-        "Only NRZ-L with polarity 1 \u2192 +1; check the polarity expected by the receiver.",
-        "Only the TM primary header is synthesised: no secondary header, no Space Packets, no frame CRC.",
-        "The optional output filter is an ideal Butterworth (no ripple, symmetric about the carrier), not the "
-        "measured response of a specific transmitter filter.",
-        "The .rfcatcher output matches a real recording byte for byte, but playback on the instrument has not "
-        "been confirmed yet.",
-        "The RRC filter adds a transient of half the filter span at the start and end of the file.",
-    ])
-    st += [H2("Troubleshooting")]
-    st += TABLE([
-        ["Symptom", "Cause / action"],
-        ["The executable starts slowly the first time", "Windows scans the new files; later starts take a few "
-         "seconds. Wait for the splash screen to close."],
-        ["Browser does not open", "Open http://localhost:8501 by hand. If the port is in use, close other "
-         "instances of the program."],
-        ["Program stops at start-up with a licence message", "See Table 1 (section 2.1)."],
-        ["\u201codd number of coded bits\u201d error", "Change the CADU count or use convolutional rate 1/2 "
-         "(see limitations)."],
-        ["Error about CADU length with a payload file", "RS E and interleave depth do not match how the file's "
-         "CADUs were built; set them to the real values."],
-        ["Replayer refuses the sample rate", "Export with Resample to fixed rate, e.g. 10 000 000 Hz."],
-        ["Recording analysis finds no ASM", "Wrong modulation or symbol rate, too low Es/N0, or a slice without "
-         "signal; try another slice or switch off decoding to see the measurements."],
-        ["An error in the console of the executable", "Report the full text of the console window to the "
-         "supplier."],
-    ], [5.6, 11.4], caption="Troubleshooting")
-
     # ---------------------------------------------------------------- A
     N.h1 = 0
     p = Paragraph("Appendix A  CLI option reference", S["h1"])
