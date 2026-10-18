@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from ccsds_chain.spectrum import contiguous_bandwidth, null_to_null_bandwidth, welch_psd
+from ccsds_chain.spectrum import contiguous_bandwidth, null_to_null_bandwidth, reference_level, smooth_psd, welch_psd
 
 
 class TestWelchPSD:
@@ -51,6 +51,29 @@ class TestContiguousBandwidth:
         db[2050] = -10.0  # a single noisy bin dipping below threshold
         bw = contiguous_bandwidth(freqs, db, threshold_db=-3.0, min_consecutive_below=3)
         assert bw == pytest.approx(200.0, abs=1.0)
+
+
+class TestReferenceLevel:
+    def test_short_noisy_signal_keeps_its_3db_bandwidth(self):
+        # Band-limited noise (flat passband |f| < 0.25 cycles/sample) and only
+        # a few Welch segments: the raw PSD maximum is a noise outlier and
+        # single bins scatter by several dB, which made the -3 dB scan stop
+        # a few bins from DC.
+        rng = np.random.default_rng(1)
+        n = 4096 * 4
+        x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        spectrum = np.fft.fft(x)
+        spectrum[np.abs(np.fft.fftfreq(n)) >= 0.25] = 0
+        x = np.fft.ifft(spectrum)
+        psd = welch_psd(x, nperseg=4096)
+        freqs = np.fft.fftshift(np.fft.fftfreq(4096))
+        db = 10 * np.log10(smooth_psd(psd) / reference_level(psd))
+        # 4 segments only: a few % low is the statistical limit; before the
+        # fix this measured ~0.009 (2% of the true width)
+        assert contiguous_bandwidth(freqs, db, threshold_db=-3.0) == pytest.approx(0.5, rel=0.1)
+
+    def test_flat_psd_reference_is_its_level(self):
+        assert reference_level(np.full(4096, 2.0)) == pytest.approx(2.0)
 
 
 class TestNullToNullBandwidth:

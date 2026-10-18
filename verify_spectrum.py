@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from ccsds_chain.utils import unpack_iq_interleaved
-from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth, null_to_null_bandwidth
+from ccsds_chain.spectrum import welch_psd, contiguous_bandwidth, null_to_null_bandwidth, reference_level, smooth_psd
 
 
 def main():
@@ -47,10 +47,11 @@ def main():
     psd = welch_psd(iq, args.nperseg)
     freqs = np.fft.fftshift(np.fft.fftfreq(args.nperseg, d=1 / fs))
 
-    peak = np.max(psd)
+    peak = reference_level(psd)
     db = 10 * np.log10(psd / peak)
 
-    bw_3db = contiguous_bandwidth(freqs, db, -3.0)
+    # -3 dB edge on the smoothed PSD: robust for short files (few segments)
+    bw_3db = contiguous_bandwidth(freqs, 10 * np.log10(smooth_psd(psd) / peak), -3.0)
     bw_null = null_to_null_bandwidth(freqs, db)
 
     symbol_rate = meta.get("symbol_rate")

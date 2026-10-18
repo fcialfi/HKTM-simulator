@@ -24,7 +24,7 @@ from ccsds_chain.mapping import BITS_PER_SYMBOL
 from ccsds_chain.pipeline import (ASM, ASM_FRAMED_INPUT_FORMATS, ChainParams, export_chain, output_filter_delay,
                                   run_chain)
 from ccsds_chain.pulse_shaping import matched_filter_sample, pulse_taps, theoretical_bandwidth
-from ccsds_chain.spectrum import welch_psd
+from ccsds_chain.spectrum import welch_psd, reference_level
 from ccsds_chain.utils import find_all_cadu_positions, find_cadu_sync, resample_ratio
 from analyze_recording import analyze, report_lines
 from ccsds_chain import rfcatcher
@@ -1126,7 +1126,7 @@ with tab_gen:
 
         psd = welch_psd(result.iq, nperseg)
         freqs = np.fft.fftshift(np.fft.fftfreq(nperseg, d=1 / result.sample_rate))
-        peak = np.max(psd)
+        peak = reference_level(psd)
         db = 10 * np.log10(psd / peak)
 
         bw_theoretical = theoretical_bandwidth(params.symbol_rate, params.pulse_shape, params.rrc_alpha)
