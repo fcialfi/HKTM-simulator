@@ -20,6 +20,31 @@ def welch_psd(x: np.ndarray, nperseg: int = 4096) -> np.ndarray:
     return acc
 
 
+def smooth_psd(psd: np.ndarray, smooth_bins: int = 31) -> np.ndarray:
+    """Moving average of a PSD estimate over `smooth_bins` frequency bins.
+
+    Short signals give a Welch estimate with only a few segments averaged,
+    whose bins scatter by several dB around the true level. Averaging
+    neighbouring bins cuts that scatter, while a symmetric average leaves
+    the -3 dB point of the passband edge in place.
+    """
+    smooth_bins = max(1, min(int(smooth_bins), len(psd)))
+    kernel = np.ones(smooth_bins) / smooth_bins
+    return np.convolve(psd, kernel, mode="same")
+
+
+def reference_level(psd: np.ndarray, smooth_bins: int = 31) -> float:
+    """Passband reference level of a PSD estimate: the peak of the
+    smoothed PSD.
+
+    The raw maximum of a noisy Welch estimate is a statistical outlier,
+    often 2-3 dB above the true passband level for short signals;
+    normalising to it pushes most of the passband near -3 dB and makes
+    the -3 dB bandwidth collapse to a few bins.
+    """
+    return float(np.max(smooth_psd(psd, smooth_bins)))
+
+
 def contiguous_bandwidth(freqs: np.ndarray, db: np.ndarray, threshold_db: float,
                           min_consecutive_below: int = 3) -> float:
     """Width of the contiguous region around DC that stays above threshold_db.
