@@ -1,11 +1,8 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-
+  # Only the GitHub Actions used by CI. Python dependencies are not bumped
+  # automatically: requirements.txt keeps minimum versions, and raising them
+  # would drop support for older installs without any need.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
