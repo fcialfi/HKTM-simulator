@@ -557,6 +557,10 @@ bandwidth is close to Rs (~1.7-1.8 MHz), and the null-to-null bandwidth
 close to Rs*(1+alpha) (~2.3-2.4 MHz, the exact theoretical value for an
 ideal RRC filter). With `--pulse-shape nrz` it expects -3 dB at ~0.886 x Rs
 and null-to-null at 2 x Rs (~3.57 MHz).
+The -3dB edge is measured on the PSD smoothed over 31 frequency bins and
+referred to its smoothed peak, so it stays reliable for short files (a few
+CADUs), whose raw PSD estimate scatters by a few dB from bin to bin; the
+null-to-null width is measured on the raw PSD.
 
 ## Building the manual
 

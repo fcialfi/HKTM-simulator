@@ -34,7 +34,7 @@ LOGO = os.path.join(ROOT, "assets", "exostaff_logo.png")
 
 TITLE = "HKTM CCSDS Signal Generator"
 SUBTITLE = "User Manual"
-ISSUE = "Issue 1.0"
+ISSUE = "Issue 1.1"
 VERSION = "0.1.0"
 
 ACCENT = colors.HexColor("#0a7ea4")
@@ -611,7 +611,10 @@ python analyze_recording.py capture.iq --fs 10e6 --dtype int16 --save-frames fra
            P("Computes the PSD of a generated file (reading its .meta.json for rate and format) and measures the "
              "\u22123 dB and null-to-null bandwidths. For the RRC baseline (Rs = 1.785 MS/s, \u03b1 = 0.35): "
              "\u22123 dB \u2248 Rs, null-to-null \u2248 Rs (1 + \u03b1) \u2248 2.41 MHz. Without filter (NRZ): "
-             "\u22123 dB \u2248 0.886 \u00d7 Rs, null-to-null = 2 \u00d7 Rs \u2248 3.57 MHz.")]
+             "\u22123 dB \u2248 0.886 \u00d7 Rs, null-to-null = 2 \u00d7 Rs \u2248 3.57 MHz."),
+           P("The \u22123 dB edge is measured on the PSD smoothed over 31 frequency bins and referred to its "
+             "smoothed peak, so the result is reliable also for short files (a few CADUs), whose raw PSD "
+             "estimate scatters by a few dB from bin to bin. The null-to-null width is measured on the raw PSD.")]
 
     # ---------------------------------------------------------------- 6
     st += H1("Test scenarios")
