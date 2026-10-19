@@ -59,8 +59,11 @@ def locate_iq(path: str) -> tuple[int, int]:
 def coded_asm_patterns(rate: str, invert_g2: bool) -> list[tuple[np.ndarray, int]]:
     """For each puncture phase at the ASM's first bit: (coded bits produced by
     ASM bits K-1..31, which don't depend on what came before the ASM, and the
-    number of coded bits the first K-1 ASM bits produce before them)."""
+    number of coded bits the first K-1 ASM bits produce before them).
+    rate "none": no convolutional code, the ASM bits themselves."""
     asm_bits = bytes_to_bits(ASM)
+    if rate == "none":
+        return [(asm_bits, 0)]
     g1, g2, _ = _rate_half_encode_from_history(asm_bits, invert_g2 and rate == "1/2",
                                                np.zeros(K - 1, dtype=np.uint8))
     pattern = PUNCTURE_PATTERNS[rate]
@@ -75,6 +78,8 @@ def coded_asm_patterns(rate: str, invert_g2: bool) -> list[tuple[np.ndarray, int
 
 def coded_length(n_bits: int, rate: str, phase: int) -> int:
     """Coded bits produced by `n_bits` input bits starting at puncture `phase`."""
+    if rate == "none":
+        return n_bits
     pattern = PUNCTURE_PATTERNS[rate]
     if pattern is None:
         return 2 * n_bits
@@ -84,9 +89,53 @@ def coded_length(n_bits: int, rate: str, phase: int) -> int:
     return int(keep[idx].sum())
 
 
+# Codings tried by detect_framing(): (convolutional rate, G2 inverted)
+CODINGS = [("1/2", True), ("1/2", False), ("2/3", False), ("3/4", False), ("5/6", False),
+           ("7/8", False), ("none", False)]
+
+
+def _asm_hits(stream: np.ndarray, rate: str, invert_g2: bool, max_errors: int = 2) -> list[tuple[int, int]]:
+    """(coded-bit index of ASM bit 0, puncture phase) of every pattern match in
+    `stream` (hard bits as +-1)."""
+    hits = []
+    for phase, (pat, head) in enumerate(coded_asm_patterns(rate, invert_g2)):
+        pm = (2.0 * pat.astype(np.float32) - 1.0)[::-1]
+        corr = np.convolve(stream, pm, mode="valid")
+        hits += [(int(pos) - head, phase) for pos in np.flatnonzero(corr >= len(pat) - 2 * max_errors)]
+    return sorted(set(hits))
+
+
+def detect_framing(stream: np.ndarray, codings: Optional[list] = None) -> Optional[tuple[str, bool, int]]:
+    """Find the coding and CADU length from the first stretch of a file's hard
+    bits: for each candidate coding, the ASM matches and the most common
+    distance between them. Returns (rate, invert_g2, cadu_bits) for the coding
+    with the most ASMs one CADU apart, or None if no coding shows a regular
+    ASM stream."""
+    best = None
+    for rate, inv in (codings or CODINGS):
+        hits = _asm_hits(stream, rate, inv)
+        if len(hits) < 3:
+            continue
+        gaps = np.diff([h[0] for h in hits])
+        if rate in ("1/2", "none"):
+            vals, counts = np.unique(gaps, return_counts=True)
+            coded = int(vals[np.argmax(counts)])
+            cadu_bits = coded // (2 if rate == "1/2" else 1)
+        else:
+            num, den = map(int, rate.split("/"))
+            cadu_bits = int(round(np.median(gaps) * num / den / 8)) * 8
+        if cadu_bits <= len(ASM) * 8:
+            continue
+        pos = {h[0] for h in hits}
+        score = sum(1 for p, ph in hits if p + coded_length(cadu_bits, rate, ph) in pos)
+        if score >= 2 and (best is None or score > best[0]):
+            best = (score, rate, inv, cadu_bits)
+    return None if best is None else best[1:]
+
+
 def verify(path: str, symbol_rate: float, fs: Optional[float] = None, dtype: str = "int16",
            modulation: str = "QPSK", pulse: str = "rrc", alpha: float = 0.35, span: int = 8,
-           conv_rate: str = "1/2", invert_g2: bool = True, interleave_depth: int = 5,
+           conv_rate: str = "auto", invert_g2: Optional[bool] = None, interleave_depth: Optional[int] = None,
            rs_n: int = 255, window_s: float = 1.0, max_asm_errors: int = 2,
            progress=None) -> dict:
     if fs is None:
@@ -107,16 +156,55 @@ def verify(path: str, symbol_rate: float, fs: Optional[float] = None, dtype: str
     offset, nbytes = locate_iq(path)
     n_samples = nbytes // sample_bytes
     n_sym = (n_samples - d) // sps
-    cadu_bits = (len(ASM) + rs_n * interleave_depth) * 8
+
+    mm = np.memmap(path, dtype="<i2" if dtype == "int16" else "<f4", mode="r",
+                   offset=offset, shape=(2 * n_samples,))
+    scale = 1.0 / INT16_FULL_SCALE if dtype == "int16" else 1.0
+
+    def symbols(k0, k1):
+        """Matched-filter output at symbols k0..k1, plus the raw chunk."""
+        s_lo, s_hi = k0 * sps, (k1 - 1) * sps + d + 1      # samples feeding these symbols
+        raw = np.asarray(mm[2 * s_lo:2 * s_hi], dtype=np.float32) * scale
+        x = raw[0::2] + 1j * raw[1::2]
+        idx = d + np.arange(k1 - k0) * sps                # polyphase: only the symbol instants
+        s = np.zeros(k1 - k0, dtype=np.complex64)
+        for j, h in enumerate(taps):
+            s += h * x[idx - j]
+        return s, x, raw, s_lo
+
+    def hard_bits(s):
+        if modulation == "QPSK":
+            bits = np.empty(2 * len(s), dtype=np.float32)
+            bits[0::2] = np.where(s.real > 0, 1.0, -1.0); bits[1::2] = np.where(s.imag > 0, 1.0, -1.0)
+            return bits
+        return np.where(s.real > 0, 1.0, -1.0).astype(np.float32)
+
+    # Coding and CADU length: as given, or detected on the first ~400 000 symbols
+    detected = None
+    if conv_rate == "auto" or invert_g2 is None or interleave_depth is None:
+        codings = [(r, inv) for r, inv in CODINGS
+                   if conv_rate in ("auto", r) and (invert_g2 is None or r != "1/2" or inv == invert_g2)]
+        detected = detect_framing(hard_bits(symbols(0, min(400_000, n_sym))[0]), codings)
+        if detected is not None:
+            conv_rate, invert_g2 = detected[0], detected[1]
+    # Without a detected or fully specified framing the ASM count can't be trusted
+    frame_check = detected is not None or not (conv_rate == "auto" or invert_g2 is None
+                                               or interleave_depth is None)
+    if interleave_depth is not None:
+        cadu_bits = (len(ASM) + rs_n * interleave_depth) * 8
+    elif detected is not None:
+        cadu_bits = detected[2]
+    else:
+        cadu_bits = (len(ASM) + rs_n * 5) * 8
+    if conv_rate == "auto":
+        conv_rate = "1/2"
+    if invert_g2 is None:
+        invert_g2 = conv_rate == "1/2"
 
     patterns = coded_asm_patterns(conv_rate, invert_g2)
     plen = len(patterns[0][0])
     pm = [(2.0 * p.astype(np.float32) - 1.0)[::-1] for p, _ in patterns]
     threshold = plen - 2 * max_asm_errors
-
-    mm = np.memmap(path, dtype="<i2" if dtype == "int16" else "<f4", mode="r",
-                   offset=offset, shape=(2 * n_samples,))
-    scale = 1.0 / INT16_FULL_SCALE if dtype == "int16" else 1.0
 
     win = max(1, int(round(window_s * fs)))
     windows = {}
@@ -128,14 +216,7 @@ def verify(path: str, symbol_rate: float, fs: Optional[float] = None, dtype: str
 
     for k0 in range(0, n_sym, CHUNK_SYMBOLS):
         k1 = min(k0 + CHUNK_SYMBOLS, n_sym)
-        s_lo, s_hi = k0 * sps, (k1 - 1) * sps + d + 1      # samples feeding these symbols
-        raw = np.asarray(mm[2 * s_lo:2 * s_hi], dtype=np.float32) * scale
-        x = raw[0::2] + 1j * raw[1::2]
-        # matched filter evaluated only at the symbol instants (polyphase)
-        idx = d + np.arange(k1 - k0) * sps                # inside x
-        s = np.zeros(k1 - k0, dtype=np.complex64)
-        for j, h in enumerate(taps):
-            s += h * x[idx - j]
+        s, x, raw, s_lo = symbols(k0, k1)
 
         # level, clipping, gaps -- per sample, on this chunk's new samples
         new = x[:(k1 - k0) * sps]
@@ -169,12 +250,7 @@ def verify(path: str, symbol_rate: float, fs: Optional[float] = None, dtype: str
             rec[4] += int(sm.sum()); rec[5] += int(clip[np.repeat(sm, 2)].sum()) if dtype == "int16" else 0
 
         # hard coded bits, then the ASM pattern search across the chunk boundary
-        if modulation == "QPSK":
-            bits = np.empty(2 * len(s), dtype=np.float32)
-            bits[0::2] = np.where(s.real > 0, 1.0, -1.0); bits[1::2] = np.where(s.imag > 0, 1.0, -1.0)
-        else:
-            bits = np.where(s.real > 0, 1.0, -1.0).astype(np.float32)
-        stream = np.concatenate([carry, bits])
+        stream = np.concatenate([carry, hard_bits(s)])
         base = carry_start
         for phase, (pat, (_, head_len)) in enumerate(zip(pm, patterns)):
             corr = np.convolve(stream, pat, mode="valid")
@@ -201,7 +277,7 @@ def verify(path: str, symbol_rate: float, fs: Optional[float] = None, dtype: str
         if p1 - p0 != expected:
             t = (d + (p1 // bps) * sps) / fs
             slips.append({"time_s": t, "spacing_bits": p1 - p0, "expected_bits": expected})
-    num, den = (1, 2) if conv_rate == "1/2" else map(int, conv_rate.split("/"))
+    num, den = {"1/2": (1, 2), "none": (1, 1)}.get(conv_rate) or tuple(map(int, conv_rate.split("/")))
     expected_asms = n_sym * bps / (cadu_bits * den / num)     # coded bits / coded bits per CADU
 
     rows = []
@@ -211,6 +287,7 @@ def verify(path: str, symbol_rate: float, fs: Optional[float] = None, dtype: str
                      "rms": np.sqrt(pw / max(n, 1)) * (INT16_FULL_SCALE if dtype == "int16" else 1),
                      "peak": pk * (INT16_FULL_SCALE if dtype == "int16" else 1), "clipped": clipped})
     return {"fs": fs, "sps": sps, "duration_s": n_samples / fs, "n_symbols": n_sym,
+            "coding": (conv_rate, invert_g2), "cadu_bits": cadu_bits, "frame_check": frame_check,
             "asms": len(asm_hits), "expected_asms": int(expected_asms), "slips": slips,
             "zero_runs": zero_runs, "windows": rows}
 
@@ -225,9 +302,15 @@ def main():
     ap.add_argument("--pulse", choices=["rrc", "nrz"], default="rrc")
     ap.add_argument("--alpha", type=float, default=0.35, help="RRC roll-off used at generation")
     ap.add_argument("--span", type=int, default=8, help="RRC span (symbols) used at generation")
-    ap.add_argument("--conv-rate", choices=list(PUNCTURE_PATTERNS), default="1/2")
-    ap.add_argument("--no-invert-g2", action="store_true", help="rate 1/2 generated without G2 inversion")
-    ap.add_argument("--interleave", type=int, default=5, help="RS interleave depth I (CADU = 4 + 255*I bytes)")
+    ap.add_argument("--conv-rate", choices=["auto", "none"] + list(PUNCTURE_PATTERNS), default="auto",
+                    help="convolutional code rate (default: detected from the file; 'none' = uncoded)")
+    g2 = ap.add_mutually_exclusive_group()
+    g2.add_argument("--invert-g2", dest="invert_g2", action="store_true", default=None,
+                    help="rate 1/2 with G2 inversion (default: detected)")
+    g2.add_argument("--no-invert-g2", dest="invert_g2", action="store_false",
+                    help="rate 1/2 without G2 inversion (default: detected)")
+    ap.add_argument("--interleave", type=int, default=None,
+                    help="RS interleave depth I, CADU = 4 + 255*I bytes (default: CADU length detected)")
     ap.add_argument("--window", type=float, default=1.0, help="statistics window, s")
     args = ap.parse_args()
 
@@ -235,7 +318,7 @@ def main():
         print(f"\r  scanning... {frac * 100:5.1f}%", end="", file=sys.stderr, flush=True)
 
     r = verify(args.file, args.symbol_rate, args.fs, args.dtype, args.modulation, args.pulse, args.alpha,
-               args.span, args.conv_rate, not args.no_invert_g2, args.interleave, window_s=args.window,
+               args.span, args.conv_rate, args.invert_g2, args.interleave, window_s=args.window,
                progress=progress)
     print(file=sys.stderr)
     w = r["windows"]
@@ -256,15 +339,28 @@ def main():
     print(f"Gaps (runs of zero samples): {len(r['zero_runs'])}")
     for t, dur in r["zero_runs"][:20]:
         print(f"  gap at {t:8.3f} s, {dur * 1e6:.1f} us")
+    rate, inv = r["coding"]
+    coding = "uncoded" if rate == "none" else f"convolutional {rate}" + (
+        f", G2 {'inverted' if inv else 'not inverted'}" if rate == "1/2" else "")
+    print(f"Framing: {coding}, CADU {r['cadu_bits'] // 8} bytes"
+          + ("" if r["frame_check"] else "  -- NOT DETECTED: no regular ASM stream found"))
     print(f"ASMs found: {r['asms']} (about {r['expected_asms']} expected); slips: {len(r['slips'])}")
     if r["slips"]:
         print("  (after a slip the timing grid is off: later MER figures are not meaningful)")
     for s in r["slips"][:20]:
         print(f"  slip at {s['time_s']:8.3f} s: ASM spacing {s['spacing_bits']} coded bits "
               f"instead of {s['expected_bits']}")
-    clean = not low and not r["zero_runs"] and not r["slips"]
-    print("RESULT:", "file is CLEAN -- look at playback / the receiving chain" if clean else
-          "the FILE has the anomalies listed above")
+    frames_ok = r["frame_check"] and r["asms"] >= r["expected_asms"] - 2
+    clean = frames_ok and not low and not r["zero_runs"] and not r["slips"]
+    if clean:
+        print("RESULT: file is CLEAN -- look at playback / the receiving chain")
+    elif not frames_ok:
+        print("RESULT: NOT VERIFIED -- the ASMs were not found, so the frame check did not run"
+              + (" (and the MER figures above are\n        probably wrong for the same reason)" if low else "")
+              + ".\n        Check --symbol-rate and --alpha, or give --conv-rate / --invert-g2 /"
+              " --no-invert-g2 / --interleave\n        matching the generation settings.")
+    else:
+        print("RESULT: the FILE has the anomalies listed above")
     return 0 if clean else 1
 
 
