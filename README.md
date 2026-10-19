@@ -458,6 +458,35 @@ the carrier offset into the generator's settings and switches back to the
 generator tab; the decoded frames can also be downloaded to regenerate the
 recorded content bit for bit.
 
+### Verifying a generated export
+
+When a receiver loses frames or shows odd Es/N0 while replaying a generated
+file, first make sure the file itself is clean. `verify_export.py` scans the
+**whole** export (any size, streamed) with the parameters it was generated
+with and reports, with the time in the file:
+
+```bash
+python verify_export.py C:\data\test.rfcatcher --symbol-rate 1.785e6 --alpha 1
+```
+
+- level per window (RMS, peak per I/Q axis, clipping) and runs of zero
+  samples (holes);
+- decision-directed MER per window: constant along a clean export (about
+  35 dB at roll-off 0.35, 55 dB at roll-off 1, set by the RRC filter's own
+  residual ISI) -- a drop means distortion or a timing break there;
+- every CADU's ASM, found directly in the demodulated, still convolutionally
+  coded bits (the last 26 ASM bits always encode to the same pattern, so no
+  Viterbi is needed and an 8 GB file takes a few minutes), and the spacing
+  between consecutive ASMs: any spacing other than exactly one CADU is a slip
+  (samples missing or repeated).
+
+The generator's timing is exact, so no synchronization loop is involved:
+whatever is reported is in the file. A clean result means the problem is in
+playback or in the receiving chain. Options: `--conv-rate`, `--interleave`,
+`--modulation`, `--pulse`, `--span`, `--fs` (default: from the `.rfcatcher`
+metadata), `--window`. Resampled exports (a sample rate that isn't an
+integer multiple of the symbol rate) can't be checked symbol-exactly.
+
 ### Tests
 
 ```bash
