@@ -482,10 +482,14 @@ python verify_export.py C:\data\test.rfcatcher --symbol-rate 1.785e6 --alpha 1
 
 The generator's timing is exact, so no synchronization loop is involved:
 whatever is reported is in the file. A clean result means the problem is in
-playback or in the receiving chain. Options: `--conv-rate`, `--interleave`,
-`--modulation`, `--pulse`, `--span`, `--fs` (default: from the `.rfcatcher`
-metadata), `--window`. Resampled exports (a sample rate that isn't an
-integer multiple of the symbol rate) can't be checked symbol-exactly.
+playback or in the receiving chain. The coding (convolutional rate, G2
+inversion, or uncoded) and the CADU length are detected from the start of
+the file; `--conv-rate`, `--invert-g2`/`--no-invert-g2` and `--interleave`
+force them. If no regular ASM stream is found the result is NOT VERIFIED,
+never clean. Other options: `--modulation`, `--pulse`, `--span`, `--fs`
+(default: from the `.rfcatcher` metadata), `--window`. Resampled exports (a
+sample rate that isn't an integer multiple of the symbol rate) can't be
+checked symbol-exactly.
 
 ### Tests
 

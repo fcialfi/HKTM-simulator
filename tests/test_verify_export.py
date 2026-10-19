@@ -52,3 +52,22 @@ def test_coded_asm_pattern_is_independent_of_the_preceding_bits():
             period = len(patterns)
             pat, head = patterns[len(prefix) % period]
             assert np.array_equal(coded[n_before + head:n_before + head + len(pat)], pat)
+
+
+def test_framing_is_detected_and_unverified_files_are_never_called_clean(tmp_path, capsys, monkeypatch):
+    # rate 1/2 WITHOUT G2 inversion, and an uncoded export: both must be detected
+    for kw, coding in ((dict(conv_invert_g2=False), ("1/2", False)), (dict(fec_conv=False), ("none", False))):
+        p = ChainParams(randomizer="long", n_cadu=120, **kw)
+        fs = p.symbol_rate * p.sps
+        iq = str(tmp_path / "x.iq")
+        export_chain(p, iq, output_dtype="int16")
+        f = _wrap(tmp_path, iq, "x.rfcatcher", fs)
+        r = ve.verify(f, p.symbol_rate)
+        assert r["coding"] == coding and r["cadu_bits"] == 1279 * 8
+        assert r["asms"] == p.n_cadu and r["slips"] == []
+
+    # wrong symbol rate: no ASM can be found, and the result must not read CLEAN
+    monkeypatch.setattr("sys.argv", ["verify_export.py", f, "--symbol-rate", "0.8925e6"])
+    assert ve.main() == 1
+    out = capsys.readouterr().out
+    assert "NOT VERIFIED" in out and "CLEAN" not in out
