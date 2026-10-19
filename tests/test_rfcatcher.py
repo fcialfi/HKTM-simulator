@@ -120,3 +120,48 @@ def test_linked_bandwidth_and_parameter_checks():
     assert any("narrower" in p for p in rfcatcher.check_parameters(10e6, 1707e6, 2e6, 2.41e6))
     meta = rfcatcher.build_metadata(10e6, 1000, 1707e6, None)
     assert meta["bandwidth"] == "9.091 MHz"
+
+
+def _recording(tmp_path):
+    iq = np.arange(-700, 700, dtype="<i2")
+    iq_path = tmp_path / "gen.iq"
+    iq_path.write_bytes(iq.tobytes())
+    meta = rfcatcher.build_metadata(10e6, len(iq) // 2, 1707e6, 4e6)
+    out = tmp_path / "gen.rfcatcher"
+    rfcatcher.write_rfcatcher(str(iq_path), str(out), meta, mtime=1788874074)
+    return out, iq, meta
+
+
+@pytest.mark.parametrize("in_place", [True, False])
+def test_rewrite_metadata_keeps_iq_and_layout(tmp_path, in_place):
+    src, iq, meta = _recording(tmp_path)
+    new = rfcatcher.clear_gain(meta)
+    assert new["gain_info"] == [] and new["gain.agc"] == "off" and meta["gain_info"]
+    dst = tmp_path / "nogain.rfcatcher"
+    rfcatcher.rewrite_metadata(str(src), new, None if in_place else str(dst))
+    target = src if in_place else dst
+
+    with tarfile.open(target) as t:
+        members = t.getmembers()
+        assert [m.name for m in members] == ["gen.iq", "gen.json"]
+        assert t.extractfile(members[0]).read() == iq.tobytes()
+    assert rfcatcher.read_metadata(str(target)) == new
+    # byte-identical to writing the recording with the new metadata directly
+    direct = tmp_path / "direct.rfcatcher"
+    rfcatcher.write_rfcatcher(str(tmp_path / "gen.iq"), str(direct), new, member_basename="gen",
+                              mtime=1788874074)
+    assert target.read_bytes() == direct.read_bytes()
+
+
+def test_rfcatcher_meta_cli(tmp_path, capsys):
+    import rfcatcher_meta
+    src, iq, meta = _recording(tmp_path)
+    dst = tmp_path / "test.rfcatcher"
+    assert rfcatcher_meta.main([str(src), "--clear-gain", "--agc", "keep", "--set", "gain.t0=30.0 dB",
+                                "--remove", "signal.level.t0", "-o", str(dst)]) == 0
+    new = rfcatcher.read_metadata(str(dst))
+    assert new["gain_info"] == [] and new["gain.agc"] == meta["gain.agc"]
+    assert new["gain.t0"] == "30.0 dB" and "signal.level.t0" not in new
+    assert rfcatcher.read_metadata(str(src)) == meta  # input untouched
+    with pytest.raises(SystemExit):
+        rfcatcher_meta.main([str(src), "--clear-gain"])  # no output chosen

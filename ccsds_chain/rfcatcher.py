@@ -248,3 +248,56 @@ def write_rfcatcher(iq_path: str, out_path: str, metadata: dict, member_basename
         out.write(meta_bytes)
         out.write(pad(len(meta_bytes)))
         out.write(b"\0" * (2 * BLOCK))  # end-of-archive marker
+
+
+# --------------------------------------------------------------------------
+# Rewriting the metadata of an existing recording
+# --------------------------------------------------------------------------
+
+def clear_gain(metadata: dict, agc: Optional[str] = "off") -> dict:
+    """A copy of `metadata` with the capture-time gain history removed: the
+    "gain_info" log emptied and "gain.agc" set to `agc` (None: left as is).
+    For checking whether the replayer acts on the gain fields copied from
+    the template recording."""
+    meta = copy.deepcopy(metadata)
+    meta["gain_info"] = []
+    if agc is not None:
+        meta["gain.agc"] = agc
+    return meta
+
+
+def _members(path: str) -> list:
+    with open(path, "rb") as f, tarfile.open(fileobj=f, mode="r:") as tar:
+        return [m for m in tar if m.isfile()]
+
+
+def rewrite_metadata(path: str, metadata: dict, out_path: Optional[str] = None) -> None:
+    """Replace the JSON metadata of the .rfcatcher recording at `path`, IQ
+    data untouched. With `out_path`, a new file is written (the IQ member
+    is streamed across); without it, `path` is changed in place: the JSON
+    member is the last one, so only the archive's tail is rewritten."""
+    members = _members(path)
+    if (len(members) != 2 or not members[0].name.lower().endswith(".iq")
+            or not members[1].name.lower().endswith(".json")):
+        raise ValueError(f"{path}: not an RF-Catcher recording (<name>.iq then <name>.json)")
+    iq, js = members
+    meta_bytes = json.dumps(metadata, indent=4).encode("utf-8")
+    tail = (tar_header(js.name, len(meta_bytes), int(js.mtime)) + meta_bytes
+            + b"\0" * (-len(meta_bytes) % BLOCK) + b"\0" * (2 * BLOCK))
+    if out_path is None:
+        with open(path, "r+b") as f:
+            f.seek(js.offset)
+            f.write(tail)
+            f.truncate()
+        return
+    if os.path.abspath(out_path) == os.path.abspath(path):
+        raise ValueError("out_path is the input file: rewrite it in place instead")
+    with open(path, "rb") as src, open(out_path, "wb") as out:
+        remaining = js.offset  # IQ header + data + padding, copied verbatim
+        while remaining:
+            chunk = src.read(min(remaining, 16 * 1024 * 1024))
+            if not chunk:
+                raise ValueError(f"{path}: truncated")
+            out.write(chunk)
+            remaining -= len(chunk)
+        out.write(tail)

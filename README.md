@@ -491,6 +491,25 @@ never clean. Other options: `--modulation`, `--pulse`, `--span`, `--fs`
 sample rate that isn't an integer multiple of the symbol rate) can't be
 checked symbol-exactly.
 
+### Changing the metadata of a recording
+
+`rfcatcher_meta.py` shows or changes the JSON metadata of an existing
+`.rfcatcher` file without regenerating it; the IQ data is not touched.
+Device fields not set by the generator (gain, AGC mode, signal level, the
+`gain_info` log of gain changes during the capture) are copied from the
+template recording; `--clear-gain` removes that gain history, for an A/B
+replay that shows whether the replayer acts on it:
+
+```bash
+python rfcatcher_meta.py C:\data\test.rfcatcher                 # show
+python rfcatcher_meta.py C:\data\test.rfcatcher --clear-gain -o C:\data\test_nogain.rfcatcher
+python rfcatcher_meta.py C:\data\test.rfcatcher --clear-gain --in-place   # no copy
+```
+
+`--clear-gain` empties `gain_info` and sets `gain.agc` to `off` (`--agc
+VALUE` for another value, `--agc keep` to leave it); `--set KEY=VALUE` and
+`--remove KEY` change any other field.
+
 ### Tests
 
 ```bash
